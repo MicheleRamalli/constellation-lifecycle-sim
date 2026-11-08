@@ -5,10 +5,14 @@ Strategies (lifecycle.simulate_plane):
     b)   in-orbit spares, (s, S) policy
     c)   early ordering of the retirement replacement
     b+c) spares and early ordering
+    d)   fixed launch cadence (lifecycle.simulate_fixed_cadence), with the search of
+         the minimum cadence meeting AVAIL_TARGET with probability AVAIL_CONFIDENCE
 
 Figures:
 - active_vs_time.png              : operational satellites vs time, one panel per strategy
 - availability_vs_order_time.png  : availability vs ORDER_TO_LAUNCH_DAYS sweep
+- cost_vs_availability.png        : strategy d) fixed cadence vs c) and b+c), launch
+                                    rate vs the two alternative requirements
 
 Availabilities are averaged from the end of the nominal deployment
 (last batch + commissioning) to the end of the horizon.
@@ -22,9 +26,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 import params
-from analytic import slot_availability_pre_order, slot_availability_renewal_reward
-from lifecycle import (deployment_launch_times, plane_availability, simulate_plane,
-                       time_to_full_operation)
+from analytic import (reference_launch_rate, slot_availability_pre_order,
+                      slot_availability_renewal_reward)
+from lifecycle import (deployment_launch_times, plane_availability, simulate_fixed_cadence,
+                       simulate_plane, time_to_full_operation)
+from scipy.integrate import quad
+from reliability import reliability_analytic
+from search import bisect_interval, search_max_interval
 
 FIG_DIR = "figures"
 DAY_S = params.SECONDS_PER_DAY
@@ -45,19 +53,20 @@ STRATEGIES = {
 }
 
 
-def run_strategy(strategy, order_to_launch_days):
+def run_strategy(strategy, order_to_launch_days, n_runs=params.N_RUNS):
     """Nominal simulation of one strategy with a given order-to-launch time.
 
     Inputs:
         strategy             : dict with n_spares, reorder_level, pre_order_retirement
         order_to_launch_days : order-to-launch time [days]
+        n_runs               : number of Monte Carlo runs [-]
     Output: simulator output (see lifecycle.simulate_plane)
     """
     n_units = params.N_SLOTS + strategy["n_spares"]
     initial_launch_s = deployment_launch_times(n_units, params.DEPLOY_BATCHES,
                                                params.DEPLOY_INTERVAL_DAYS * DAY_S)
     return simulate_plane(
-        n_slots=params.N_SLOTS, n_runs=params.N_RUNS, seed=params.SEED,
+        n_slots=params.N_SLOTS, n_runs=n_runs, seed=params.SEED,
         sim_duration_s=params.SIM_DURATION_YEARS * YEAR_S, dt_s=params.DT_DAYS * DAY_S,
         initial_launch_s=initial_launch_s, order_to_launch_s=order_to_launch_days * DAY_S,
         commissioning_s=params.COMMISSIONING_DAYS * DAY_S,
@@ -152,7 +161,7 @@ def sweep_order_time(strategy):
     keys = ["slot_mc", "slot_rr", "plane_mean", "plane_p5", "plane_p95"]
     sweep = {k: np.zeros(len(ORDER_SWEEP_DAYS)) for k in keys}
     for i, order_days in enumerate(ORDER_SWEEP_DAYS):
-        out = run_strategy(strategy, order_days)
+        out = run_strategy(strategy, order_days, n_runs=params.N_RUNS_SWEEP)
         after = out["t_s"] >= DEPLOY_END_S
         avail = plane_availability(out["n_active"], params.MIN_ACTIVE, out["t_s"], DEPLOY_END_S)
         sweep["slot_mc"][i] = out["n_active"][:, after].mean() / params.N_SLOTS
@@ -192,6 +201,255 @@ def plot_availability_vs_order_time(sweeps, path):
     plt.close(fig)
 
 
+# ---------------------------------------------------------------------------
+# v0.2: strategy d) fixed cadence, search of the minimum cadence, cost comparison
+# ---------------------------------------------------------------------------
+
+# Two alternative mission requirements on the per-run availability after deployment:
+# "percentile": at least AVAIL_CONFIDENCE of the runs have availability >= AVAIL_TARGET
+# "mean"      : the mean availability over the runs is >= AVAIL_TARGET
+REQUIREMENTS = {
+    "percentile": {"threshold": params.AVAIL_CONFIDENCE,
+                   "text": f"{params.AVAIL_CONFIDENCE:.0%} of runs with availability >= {params.AVAIL_TARGET}"},
+    "mean": {"threshold": params.AVAIL_TARGET,
+             "text": f"mean availability >= {params.AVAIL_TARGET}"},
+}
+
+
+def run_cadence(k, interval_days, seed, n_runs):
+    """Strategy d): N_SLOTS deployed in batches, then k satellites every interval_days.
+
+    The first cadence launch is together with the LAST deployment batch, so the
+    cadence satellites are commissioned at the end of deployment and act at once
+    as spares. Reason: no operator would leave the plane without spares during
+    the infant-mortality period right after deployment (with the Weibull fit,
+    beta < 1, the failure rate is highest at the start); it is also consistent
+    with strategy b), whose first batch already carries the spare. Starting the
+    cadence one interval after the last batch would leave a gap of up to T days
+    without spares, and the requirement would then measure that gap instead of
+    the cadence (seen in the first version: T* ~ 5 % of the averaging window).
+    """
+    initial_launch_s = deployment_launch_times(params.N_SLOTS, params.DEPLOY_BATCHES,
+                                               params.DEPLOY_INTERVAL_DAYS * DAY_S)
+    return simulate_fixed_cadence(
+        n_slots=params.N_SLOTS, cadence_sats=k, cadence_interval_s=interval_days * DAY_S,
+        cadence_start_s=initial_launch_s.max(), n_runs=n_runs, seed=seed,
+        sim_duration_s=params.SIM_DURATION_YEARS * YEAR_S, dt_s=params.DT_DAYS * DAY_S,
+        initial_launch_s=initial_launch_s, commissioning_s=params.COMMISSIONING_DAYS * DAY_S,
+        design_life_s=params.DESIGN_LIFE_YEARS * YEAR_S,
+        launch_success_prob=params.LAUNCH_SUCCESS_PROB, reliability=RELIABILITY)
+
+
+def requirement_metrics(out):
+    """Values compared with the two requirements (availability after deployment).
+
+    Output: {"percentile": fraction of runs with availability >= AVAIL_TARGET [-],
+             "mean": mean availability over the runs [-]}
+    """
+    avail = plane_availability(out["n_active"], params.MIN_ACTIVE, out["t_s"], DEPLOY_END_S)
+    return {"percentile": np.mean(avail >= params.AVAIL_TARGET), "mean": avail.mean()}
+
+
+def mc_launch_rate_per_year(out):
+    """Mean satellites launched per year after the end of deployment (MC) [1/yr]."""
+    after = out["t_s"] >= DEPLOY_END_S
+    years = (out["t_s"][-1] - DEPLOY_END_S) / YEAR_S
+    return out["n_launched"][:, after].sum(axis=1).mean() / years
+
+
+def steady_rate_pre_order(n_spares):
+    """Steady-state launch rate of c) / b+c) with one reorder per loss [satellites/yr].
+
+    Each of the N + S units renews independently with mean cycle
+    E[cycle_c] = ORDER + integral_0^(DL - ORDER - C) R dt (analytic.slot_availability_pre_order),
+    so the rate is (N + S) / E[cycle_c].
+    """
+    order_s = params.ORDER_TO_LAUNCH_DAYS * DAY_S
+    a_s = params.DESIGN_LIFE_YEARS * YEAR_S - order_s - params.COMMISSIONING_DAYS * DAY_S
+    integral_s = YEAR_S * quad(lambda ty: reliability_analytic(ty * YEAR_S, **RELIABILITY),
+                               0.0, a_s / YEAR_S, limit=200)[0]
+    return (params.N_SLOTS + n_spares) / (order_s + integral_s) * YEAR_S
+
+
+# Simulations of strategy d) already run: {(k, seed, T_days): requirement_metrics}.
+# Shared by the two requirements, so the same (k, seed, T) is never simulated twice.
+CADENCE_CACHE = {}
+
+
+def cadence_metrics(k, seed, t_days):
+    """Requirement metrics of strategy d) for (k, seed, T), with N_RUNS_SWEEP runs (cached)."""
+    key = (k, seed, int(t_days))
+    if key not in CADENCE_CACHE:
+        CADENCE_CACHE[key] = requirement_metrics(run_cadence(k, int(t_days), seed,
+                                                             params.N_RUNS_SWEEP))
+    return CADENCE_CACHE[key]
+
+
+def cadence_search(k, seed, requirement, t_ref_days=None):
+    """Largest interval T [days] meeting one requirement for k satellites per launch.
+
+    Without t_ref_days: coarse sweep + bisection (search.search_max_interval).
+    With t_ref_days (check of another seed): bisection between t_ref -/+ 2 grid
+    steps after checking that the bracket is valid, else a full sweep.
+    Output: result dict of search.search_max_interval (at least "t_star_days")
+    """
+    threshold = REQUIREMENTS[requirement]["threshold"]
+
+    def evaluate(t_days):
+        return cadence_metrics(k, seed, t_days)[requirement]
+
+    start, stop, step = (np.array(params.CADENCE_GRID_DAYS_PER_SAT) * k).astype(int)
+    if t_ref_days is not None:
+        lo, hi = t_ref_days - 2 * step, t_ref_days + 2 * step
+        if lo > 0 and evaluate(lo) >= threshold and evaluate(hi) < threshold:
+            return {"t_star_days": bisect_interval(evaluate, lo, hi, threshold)}
+    return search_max_interval(evaluate, np.arange(start, stop + 1, step), threshold)
+
+
+def failure_breakdown(out):
+    """How many unplanned losses the runs that fail the percentile requirement had.
+
+    Unplanned loss = on-orbit failure or launch failure (retirements excluded).
+    Output: (fraction of runs failing [-], {number of losses: fraction of ALL runs [-]})
+    """
+    avail = plane_availability(out["n_active"], params.MIN_ACTIVE, out["t_s"], DEPLOY_END_S)
+    failing = avail < params.AVAIL_TARGET
+    losses = out["n_failures"] + out["n_launch_failures"]
+    counts = {int(n): np.sum(failing & (losses == n)) / len(avail) for n in np.unique(losses[failing])}
+    return failing.mean(), counts
+
+
+def cost_study():
+    """Strategy d) search of T* and comparison with c) and b+c) (table + figure)."""
+    ref_rate = reference_launch_rate(params.N_SLOTS, RELIABILITY,
+                                     params.DESIGN_LIFE_YEARS * YEAR_S,
+                                     params.COMMISSIONING_DAYS * DAY_S) * YEAR_S
+    print(f"Reference rate N/E[up] = {ref_rate:.3f} satellites/yr "
+          f"(every satellite gives its whole useful life, no gaps)")
+
+    # d) search of T* for each k and each requirement (nominal seed + check seeds)
+    d_best = {req: {} for req in REQUIREMENTS}
+    for req, spec in REQUIREMENTS.items():
+        print(f"Requirement '{req}': {spec['text']}")
+        for k in params.CADENCE_SATS_OPTIONS:
+            result = cadence_search(k, params.SEED, req)
+            t_star = result["t_star_days"]
+            if np.isnan(t_star):
+                print(f"  d) k = {k}: no interval of the grid meets the requirement")
+                continue
+            if not result.get("bracketed", True):
+                print(f"  d) k = {k}: every interval of the grid meets it (T* >= {t_star} d)")
+            checks = [cadence_search(k, seed, req, t_ref_days=t_star)["t_star_days"]
+                      for seed in params.SEEDS_CHECK]
+            d_best[req][k] = t_star
+            print(f"  d) k = {k}: T* = {t_star} d (seeds {params.SEEDS_CHECK}: {checks}) -> "
+                  f"{k * 365.25 / t_star:.3f} satellites/yr; non monotone: {result.get('non_monotone')}")
+
+    # Sweep curves for the figure (nominal seed, grid points only)
+    d_curves = {}
+    for k in params.CADENCE_SATS_OPTIONS:
+        t_grid = np.array(sorted(t for (kk, seed, t) in CADENCE_CACHE
+                                 if kk == k and seed == params.SEED))
+        d_curves[k] = {"rate": k * 365.25 / t_grid,
+                       **{req: np.array([CADENCE_CACHE[(k, params.SEED, t)][req] for t in t_grid])
+                          for req in REQUIREMENTS}}
+
+    # Table with N_RUNS runs: d) at each T* found, c) and b+c) with S = 0..3
+    rows = []
+    configs = []
+    for req in REQUIREMENTS:
+        for k, t_star in d_best[req].items():
+            if ("d", k, t_star) not in configs:
+                configs.append(("d", k, t_star))
+    for n_spares in range(0, 4):
+        configs.append(("c" if n_spares == 0 else "b+c", n_spares, None))
+
+    print(f"{'Configuration':24s} {'sats/yr steady':>14s} {'sats/yr MC':>10s} "
+          f"{'mean avail (5-95 %)':>22s} {'runs >= target':>14s}")
+    outputs = {}
+    for family, value, t_star in configs:
+        if family == "d":
+            out = run_cadence(value, t_star, params.SEED, params.N_RUNS)
+            rate = value * 365.25 / t_star
+            label = f"d) k={value}, T={t_star} d"
+        else:
+            strategy = dict(n_spares=value, reorder_level=value, pre_order_retirement=True)
+            out = run_strategy(strategy, params.ORDER_TO_LAUNCH_DAYS)
+            rate = steady_rate_pre_order(value)
+            label = "c) early ordering" if value == 0 else f"b+c) S={value}"
+        outputs[label] = out
+        metrics = requirement_metrics(out)
+        avail = plane_availability(out["n_active"], params.MIN_ACTIVE, out["t_s"], DEPLOY_END_S)
+        p5, p95 = np.percentile(avail, [5, 95])
+        rows.append({"family": family, "label": label, "rate": rate, **metrics})
+        print(f"{label:24s} {rate:14.3f} {mc_launch_rate_per_year(out):10.3f} "
+              f"{metrics['mean']:10.4f} ({p5:.3f}-{p95:.3f}) {metrics['percentile']:14.3f}")
+
+    # Cheapest configuration of each family, for each requirement
+    for req, spec in REQUIREMENTS.items():
+        print(f"Cheapest configuration per family, requirement '{req}' ({spec['text']}):")
+        for family in ["d", "c", "b+c"]:
+            ok = [r for r in rows if r["family"] == family and r[req] >= spec["threshold"]]
+            if ok:
+                best = min(ok, key=lambda r: r["rate"])
+                print(f"  {family:4s}: {best['label']} -> {best['rate']:.3f} satellites/yr")
+            else:
+                print(f"  {family:4s}: none of the configurations tested meets it")
+
+    # c) alone: why its runs fail the percentile requirement
+    failing, counts = failure_breakdown(outputs["c) early ordering"])
+    print(f"c) alone: {failing:.3f} of the runs fail (availability < {params.AVAIL_TARGET}); "
+          "by number of unplanned losses in the run: "
+          + ", ".join(f"{n}: {f:.3f}" for n, f in counts.items()))
+
+    plot_cost_vs_availability(d_curves, d_best, rows, ref_rate,
+                              os.path.join(FIG_DIR, "cost_vs_availability.png"))
+
+
+def plot_cost_vs_availability(d_curves, d_best, rows, ref_rate, path):
+    """Launch rate vs requirement metric, one panel per requirement.
+
+    Inputs:
+        d_curves : {k: {"rate": [1/yr], "percentile": [-], "mean": [-]}} from the d) sweep
+        d_best   : {requirement: {k: T* [days]}}
+        rows     : table rows (family, label, steady rate [1/yr], metrics) from N_RUNS runs
+        ref_rate : reference rate N/E[up] [1/yr]
+        path     : output file path
+    """
+    markers = {"c) early ordering": "s", "b+c) S=1": "D", "b+c) S=2": "^", "b+c) S=3": "v"}
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
+    for ax, (req, spec) in zip(axes, REQUIREMENTS.items()):
+        for k, curve in d_curves.items():
+            order = np.argsort(curve["rate"])
+            line, = ax.plot(curve["rate"][order], curve[req][order], ".-", alpha=0.7,
+                            label=f"d) fixed cadence, k = {k}")
+            if k in d_best[req]:
+                t_star = d_best[req][k]
+                ax.plot(k * 365.25 / t_star, spec["threshold"], "*", ms=14,
+                        color=line.get_color(), label=f"d) k = {k}: T* = {t_star} d")
+        for row in rows:
+            if row["family"] in ("c", "b+c"):
+                ax.plot(row["rate"], row[req], markers[row["label"]], ms=8, color="k",
+                        mfc="none" if row["family"] == "c" else "k", label=row["label"])
+        ax.axhline(spec["threshold"], color="r", linestyle="--", label=f"requirement: {spec['text']}")
+        ax.axvline(ref_rate, color="gray", linestyle=":",
+                   label=f"reference rate N/E[up] = {ref_rate:.2f}/yr (whole useful life, no gaps)")
+        ax.set_xlabel("Satellites launched per year, steady state [1/yr]")
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=7, loc="lower right")
+    axes[0].set_ylabel(f"Fraction of runs with availability >= {params.AVAIL_TARGET} [-]")
+    axes[0].set_title("(a) Requirement on the 5th percentile of the runs", fontsize=10)
+    axes[0].set_ylim(-0.02, 1.02)
+    axes[1].set_ylabel("Mean plane availability [-]")
+    axes[1].set_title("(b) Requirement on the mean availability", fontsize=10)
+    fig.suptitle(f"Cost vs availability | {params.N_SLOTS} slots, DL = {params.DESIGN_LIFE_YEARS:.0f} yr, "
+                 f"order-to-launch = {params.ORDER_TO_LAUNCH_DAYS:.0f} d, commissioning = "
+                 f"{params.COMMISSIONING_DAYS:.0f} d", fontsize=10)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
 def main():
     os.makedirs(FIG_DIR, exist_ok=True)
 
@@ -207,6 +465,9 @@ def main():
         print(f"  {label}: plane availability "
               + ", ".join(f"{a:.3f}" for a in sweeps[label]["plane_mean"]))
     plot_availability_vs_order_time(sweeps, os.path.join(FIG_DIR, "availability_vs_order_time.png"))
+
+    print("v0.2: fixed cadence d), search of the minimum cadence, cost comparison")
+    cost_study()
     print(f"Figures saved in {FIG_DIR}/")
 
 

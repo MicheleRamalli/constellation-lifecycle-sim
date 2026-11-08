@@ -1,10 +1,13 @@
 """Lifecycle Monte Carlo of one orbital plane.
 
-Two simulators:
+Three simulators:
 - simulate_launch_on_failure: strategy a) only, one satellite per slot. Kept as
   a simple, independent reference implementation.
 - simulate_plane: strategies a), b) in-orbit spares, c) early ordering of the
   retirement replacement, and b + c, with one pool of satellite records.
+- simulate_fixed_cadence: strategy d), launches at a fixed cadence.
+The last two share the helper functions detect_ends, launch_due and
+commission_and_fill_slots.
 
 Common model (all times in seconds):
 - Each satellite gets its failure time at launch. Age is counted from launch
@@ -57,6 +60,22 @@ def deployment_launch_times(n_units, n_batches, interval_s):
     for b, units in enumerate(batches):
         t_launch_s[units] = b * interval_s
     return t_launch_s
+
+
+def cadence_launch_times(cadence_start_s, cadence_interval_s, sim_duration_s):
+    """Dates of the fixed-cadence launches within the simulated time span.
+
+    Inputs:
+        cadence_start_s    : first cadence launch [s]
+        cadence_interval_s : time between cadence launches [s]
+        sim_duration_s     : simulated time span [s]
+    Output:
+        launch dates [s], shape (n_launches,)
+    """
+    if cadence_start_s > sim_duration_s:
+        return np.zeros(0)
+    n_launches = int((sim_duration_s - cadence_start_s) // cadence_interval_s) + 1
+    return cadence_start_s + np.arange(n_launches) * cadence_interval_s
 
 
 def launch_satellites(n, t_launch_s, rng, design_life_s, launch_success_prob, reliability):
@@ -170,6 +189,69 @@ def simulate_launch_on_failure(n_slots, n_runs, seed, sim_duration_s, dt_s, init
     }
 
 
+def is_alive(status):
+    """True for records holding a live satellite (in commissioning, active or spare)."""
+    return (status == COMMISSIONING) | (status == ACTIVE) | (status == SPARE)
+
+
+def new_counters(n_runs):
+    """Per-run event counters shared by simulate_plane and simulate_fixed_cadence."""
+    keys = ["n_failures", "n_retirements", "n_launch_failures", "n_spares_lost"]
+    return {key: np.zeros(n_runs, dtype=int) for key in keys}
+
+
+def detect_ends(t, status, t_end_s, end_kind, counters):
+    """Find the live satellites whose end of life is reached at time t.
+
+    Inputs:
+        t                : current time [s]
+        status, t_end_s, end_kind : record arrays, shape (n_runs, n_records)
+        counters         : dict of per-run counters (new_counters), updated in place
+    Output:
+        ended : boolean mask, shape (n_runs, n_records); the caller sets the new status
+    """
+    ended = is_alive(status) & (t >= t_end_s)
+    counters["n_failures"] += np.sum(ended & (end_kind == ON_ORBIT_FAILURE), axis=1)
+    counters["n_retirements"] += np.sum(ended & (end_kind == RETIREMENT), axis=1)
+    counters["n_launch_failures"] += np.sum(ended & (end_kind == LAUNCH_FAILURE), axis=1)
+    counters["n_spares_lost"] += np.sum(ended & (status == SPARE), axis=1)
+    return ended
+
+
+def launch_due(t, status, t_next_launch_s, t_launch_s, t_end_s, end_kind, rngs,
+               design_life_s, launch_success_prob, reliability):
+    """Launch the WAITING records due at time t (each run uses its own generator).
+
+    The record arrays are updated in place: the launched records become
+    COMMISSIONING with their launch time and end of life.
+    Output: satellites launched in each run, shape (n_runs,)
+    """
+    due = (status == WAITING) & (t >= t_next_launch_s)
+    for r in np.nonzero(due.any(axis=1))[0]:
+        records = np.nonzero(due[r])[0]
+        t_end_s[r, records], end_kind[r, records] = launch_satellites(
+            len(records), t, rngs[r], design_life_s, launch_success_prob, reliability)
+    t_launch_s[due] = t
+    status[due] = COMMISSIONING
+    return np.sum(due, axis=1)
+
+
+def commission_and_fill_slots(t, status, t_launch_s, t_end_s, commissioning_s, n_slots):
+    """Commissioned satellites become spares; spares fill the empty slots.
+
+    Satellites still alive after commissioning join the spares. Then spares fill
+    the empty slots, oldest first (H3), instantly (H4). status is updated in place.
+    """
+    ready = (status == COMMISSIONING) & (t >= t_launch_s + commissioning_s) & (t < t_end_s)
+    status[ready] = SPARE
+    n_empty = n_slots - np.sum(status == ACTIVE, axis=1)
+    n_available = np.sum(status == SPARE, axis=1)
+    for r in np.nonzero((n_empty > 0) & (n_available > 0))[0]:
+        spares = np.nonzero(status[r] == SPARE)[0]
+        oldest_first = spares[np.argsort(t_launch_s[r, spares], kind="stable")]
+        status[r, oldest_first[:n_empty[r]]] = ACTIVE
+
+
 def simulate_plane(n_slots, n_spares, reorder_level, pre_order_retirement, n_runs, seed,
                    sim_duration_s, dt_s, initial_launch_s, order_to_launch_s, commissioning_s,
                    design_life_s, launch_success_prob, sats_per_launch, reliability):
@@ -247,21 +329,13 @@ def simulate_plane(n_slots, n_spares, reorder_level, pre_order_retirement, n_run
     n_active = np.zeros((n_runs, n_steps), dtype=np.int16)
     n_spares_in_orbit = np.zeros((n_runs, n_steps), dtype=np.int16)
     n_launched = np.zeros((n_runs, n_steps), dtype=np.int16)
-    n_failures = np.zeros(n_runs, dtype=int)
-    n_retirements = np.zeros(n_runs, dtype=int)
-    n_launch_failures = np.zeros(n_runs, dtype=int)
-    n_spares_lost = np.zeros(n_runs, dtype=int)
+    counters = new_counters(n_runs)
 
     for k in range(n_steps):
         t = t_grid_s[k]
 
         # 1. Detect satellites that reached their end of life
-        alive = (status == COMMISSIONING) | (status == ACTIVE) | (status == SPARE)
-        ended = alive & (t >= t_end_s)
-        n_failures += np.sum(ended & (end_kind == ON_ORBIT_FAILURE), axis=1)
-        n_retirements += np.sum(ended & (end_kind == RETIREMENT), axis=1)
-        n_launch_failures += np.sum(ended & (end_kind == LAUNCH_FAILURE), axis=1)
-        n_spares_lost += np.sum(ended & (status == SPARE), axis=1)
+        ended = detect_ends(t, status, t_end_s, end_kind, counters)
         status[ended & has_successor] = FREE   # planned: the successor is on its way
         status[ended & ~has_successor] = DEAD  # unplanned loss
         has_successor[ended] = False
@@ -275,8 +349,7 @@ def simulate_plane(n_slots, n_spares, reorder_level, pre_order_retirement, n_run
 
         # 3. Early ordering: live satellites at age >= a order their successor
         if pre_order_retirement:
-            alive = (status == COMMISSIONING) | (status == ACTIVE) | (status == SPARE)
-            planned = alive & ~has_successor & (t >= t_launch_s + pre_order_age_s)
+            planned = is_alive(status) & ~has_successor & (t >= t_launch_s + pre_order_age_s)
             for r in np.nonzero(planned.any(axis=1))[0]:
                 n_new = np.sum(planned[r])
                 free = np.nonzero(status[r] == FREE)[0]
@@ -286,41 +359,101 @@ def simulate_plane(n_slots, n_spares, reorder_level, pre_order_retirement, n_run
                 t_next_launch_s[r, free[:n_new]] = t + order_to_launch_s
             has_successor[planned] = True
 
-        # 4. Launch the satellites that are due (each run uses its own generator)
-        due = (status == WAITING) & (t >= t_next_launch_s)
-        for r in np.nonzero(due.any(axis=1))[0]:
-            records = np.nonzero(due[r])[0]
-            t_end_s[r, records], end_kind[r, records] = launch_satellites(
-                len(records), t, rngs[r], design_life_s, launch_success_prob, reliability)
-        t_launch_s[due] = t
-        status[due] = COMMISSIONING
-        n_launched[:, k] = np.sum(due, axis=1)
+        # 4. Launch the satellites that are due
+        n_launched[:, k] = launch_due(t, status, t_next_launch_s, t_launch_s, t_end_s, end_kind,
+                                      rngs, design_life_s, launch_success_prob, reliability)
 
-        # 5. Commissioned satellites (still alive) join the spares
-        ready = (status == COMMISSIONING) & (t >= t_launch_s + commissioning_s) & (t < t_end_s)
-        status[ready] = SPARE
-
-        # 6. Spares fill the empty slots, oldest first (H3), instantly (H4)
-        n_empty = n_slots - np.sum(status == ACTIVE, axis=1)
-        n_available = np.sum(status == SPARE, axis=1)
-        for r in np.nonzero((n_empty > 0) & (n_available > 0))[0]:
-            spares = np.nonzero(status[r] == SPARE)[0]
-            oldest_first = spares[np.argsort(t_launch_s[r, spares], kind="stable")]
-            status[r, oldest_first[:n_empty[r]]] = ACTIVE
+        # 5-6. Commissioning, spares fill the empty slots
+        commission_and_fill_slots(t, status, t_launch_s, t_end_s, commissioning_s, n_slots)
 
         n_active[:, k] = np.sum(status == ACTIVE, axis=1)
         n_spares_in_orbit[:, k] = np.sum(status == SPARE, axis=1)
 
-    return {
-        "t_s": t_grid_s,
-        "n_active": n_active,
-        "n_spares_in_orbit": n_spares_in_orbit,
-        "n_launched": n_launched,
-        "n_failures": n_failures,
-        "n_retirements": n_retirements,
-        "n_launch_failures": n_launch_failures,
-        "n_spares_lost": n_spares_lost,
-    }
+    return {"t_s": t_grid_s, "n_active": n_active, "n_spares_in_orbit": n_spares_in_orbit,
+            "n_launched": n_launched, **counters}
+
+
+def simulate_fixed_cadence(n_slots, cadence_sats, cadence_interval_s, cadence_start_s, n_runs,
+                           seed, sim_duration_s, dt_s, initial_launch_s, commissioning_s,
+                           design_life_s, launch_success_prob, reliability):
+    """Monte Carlo simulation of one plane with launches at a fixed cadence (strategy d).
+
+    After the initial deployment (initial_launch_s), cadence_sats satellites are
+    launched every cadence_interval, starting at cadence_start, whatever happens
+    in orbit. Lost satellites are never reordered. Satellites not needed in a
+    slot stay in orbit as hot spares (H1-H4, see simulate_plane) and retire at
+    design life from their own launch, even if never used.
+    H5 ASSUMPTION: cadence_sats satellites are always ready at each cadence date
+    (production planned in advance, no order-to-launch delay).
+
+    Records: a satellite lives at most design_life, so at any time at most
+    n_initial + cadence_sats * (ceil(DL / interval) + 1) satellites exist; records
+    of ended satellites are freed and reused (+ one cohort of margin).
+
+    Inputs:
+        n_slots             : satellite positions in the plane [-]
+        cadence_sats        : satellites per cadence launch, k [-]
+        cadence_interval_s  : time between cadence launches, T [s]
+        cadence_start_s     : time of the first cadence launch [s]
+        n_runs, seed, sim_duration_s, dt_s : as simulate_plane
+        initial_launch_s    : first launch time of each initially deployed satellite [s],
+                              shape (n_initial,) or (n_runs, n_initial)
+        commissioning_s, design_life_s, launch_success_prob, reliability : as simulate_plane
+    Output: dict as simulate_plane
+    """
+    if not np.isfinite(design_life_s):
+        raise ValueError("Fixed cadence needs a finite design life (bounded number of records)")
+
+    rngs = [np.random.default_rng(s) for s in np.random.SeedSequence(seed).spawn(n_runs)]
+    n_steps = int(sim_duration_s // dt_s) + 1
+    t_grid_s = np.arange(n_steps) * dt_s
+
+    n_initial = np.shape(initial_launch_s)[-1]
+    n_records = n_initial + cadence_sats * (int(np.ceil(design_life_s / cadence_interval_s)) + 2)
+    shape = (n_runs, n_records)
+    status = np.full(shape, FREE, dtype=np.int8)
+    status[:, :n_initial] = WAITING
+    t_next_launch_s = np.zeros(shape)
+    t_next_launch_s[:, :n_initial] = np.broadcast_to(initial_launch_s, (n_runs, n_initial))
+    t_launch_s = np.zeros(shape)
+    t_end_s = np.zeros(shape)
+    end_kind = np.zeros(shape, dtype=int)
+
+    n_active = np.zeros((n_runs, n_steps), dtype=np.int16)
+    n_spares_in_orbit = np.zeros((n_runs, n_steps), dtype=np.int16)
+    n_launched = np.zeros((n_runs, n_steps), dtype=np.int16)
+    counters = new_counters(n_runs)
+    t_next_cadence_s = cadence_start_s
+
+    for k in range(n_steps):
+        t = t_grid_s[k]
+
+        # 1. Detect satellites that reached their end of life: no reorder
+        ended = detect_ends(t, status, t_end_s, end_kind, counters)
+        status[ended] = FREE
+
+        # 2. Cadence launch (same dates in every run)
+        if t >= t_next_cadence_s:
+            for r in range(n_runs):
+                free = np.nonzero(status[r] == FREE)[0]
+                if len(free) < cadence_sats:
+                    raise RuntimeError("No free satellite record for a cadence launch")
+                status[r, free[:cadence_sats]] = WAITING
+                t_next_launch_s[r, free[:cadence_sats]] = t
+            t_next_cadence_s += cadence_interval_s
+
+        # 3. Launch the satellites that are due
+        n_launched[:, k] = launch_due(t, status, t_next_launch_s, t_launch_s, t_end_s, end_kind,
+                                      rngs, design_life_s, launch_success_prob, reliability)
+
+        # 4. Commissioning, spares fill the empty slots
+        commission_and_fill_slots(t, status, t_launch_s, t_end_s, commissioning_s, n_slots)
+
+        n_active[:, k] = np.sum(status == ACTIVE, axis=1)
+        n_spares_in_orbit[:, k] = np.sum(status == SPARE, axis=1)
+
+    return {"t_s": t_grid_s, "n_active": n_active, "n_spares_in_orbit": n_spares_in_orbit,
+            "n_launched": n_launched, **counters}
 
 
 def plane_availability(n_active, min_active, t_s, t_start_s):

@@ -113,11 +113,27 @@ def birth_death_stationary(n_units, fail_rate, repair_rate):
     return np.linalg.solve(A, b)
 
 
+def active_distribution_from_usable(p_usable, n_slots):
+    """Distribution of operational satellites from the distribution of usable satellites.
+
+    With U usable satellites (commissioned and alive), the operational ones are
+    min(n_slots, U): the spares fill every empty slot.
+
+    Inputs:
+        p_usable : probability of U = u, u = 0..u_max, shape (u_max + 1,)
+        n_slots  : satellite positions in the plane [-]
+    Output:
+        P(n_active = j) for j = 0..n_slots, shape (n_slots + 1,)
+    """
+    p_active = np.zeros(n_slots + 1)
+    n_copy = min(len(p_usable), n_slots)
+    p_active[:n_copy] = p_usable[:n_copy]
+    p_active[n_slots] = np.sum(p_usable[n_slots:])  # U >= n_slots fills every slot
+    return p_active
+
+
 def active_distribution_from_down(p_down, n_slots):
     """Distribution of operational satellites from the distribution of units down.
-
-    With U usable units out of a pool of n_units, the operational satellites are
-    min(n_slots, U): the spares fill every empty slot.
 
     Inputs:
         p_down  : probability of k units down, k = 0..n_units, shape (n_units + 1,)
@@ -125,11 +141,7 @@ def active_distribution_from_down(p_down, n_slots):
     Output:
         P(n_active = j) for j = 0..n_slots, shape (n_slots + 1,)
     """
-    n_units = len(p_down) - 1
-    p_usable = p_down[::-1]  # P(U = u) = P(down = n_units - u)
-    p_active = p_usable[:n_slots + 1].copy()
-    p_active[n_slots] = np.sum(p_usable[n_slots:])  # U >= n_slots fills every slot
-    return p_active
+    return active_distribution_from_usable(p_down[::-1], n_slots)  # U = n_units - down
 
 
 def active_distribution_binomial(n_slots, n_spares, p_up):
@@ -148,3 +160,61 @@ def active_distribution_binomial(n_slots, n_spares, p_up):
     n_units = n_slots + n_spares
     p_down = binom.pmf(np.arange(n_units + 1), n_units, 1.0 - p_up)
     return active_distribution_from_down(p_down, n_slots)
+
+
+def usable_distribution_cadence(t_s, launch_times_s, launch_counts, reliability, design_life_s,
+                                commissioning_s, launch_success_prob):
+    """Exact distribution of usable satellites at time t, fixed cadence (strategy d).
+
+    No satellite is ever reordered and every satellite is independent (H1, H2:
+    same R(t) from launch, active or spare). A satellite of the cohort launched
+    at t_j is usable at time t iff its launch succeeded, it is commissioned
+    (age >= C), it has not failed (prob. R(age)) and it has not retired
+    (age < DL). So each cohort gives Binomial(k_j, q_j), q_j = p_launch R(t - t_j),
+    and U(t) is their sum (a Poisson-binomial distribution), computed exactly
+    by convolving the binomial pmfs.
+
+    Inputs:
+        t_s                 : time [s]
+        launch_times_s      : launch time of each cohort [s], shape (n_cohorts,)
+        launch_counts       : satellites in each cohort [-], shape (n_cohorts,)
+        reliability         : dict with the reliability model
+        design_life_s       : design life [s]
+        commissioning_s     : commissioning time [s]
+        launch_success_prob : probability that a launch succeeds [-]
+    Output:
+        P(U = u), u = 0..total satellites of the usable cohorts
+    """
+    pmf = np.array([1.0])
+    for t_j, k_j in zip(launch_times_s, launch_counts):
+        age_s = t_s - t_j
+        if commissioning_s <= age_s < design_life_s:
+            q = launch_success_prob * reliability_analytic(age_s, **reliability)
+            pmf = np.convolve(pmf, binom.pmf(np.arange(k_j + 1), k_j, q))
+    return pmf
+
+
+def reference_launch_rate(n_slots, reliability, design_life_s, commissioning_s):
+    """Reference launch rate N / E[up] [satellites/s].
+
+    E[up] = integral_C^DL R(t) dt is the mean useful life of a satellite
+    (usable from commissioning to min(failure, design life)). N / E[up] is the
+    rate at which every satellite gives its whole useful life and no slot is
+    ever empty (no gaps, no unused spares). It is a reference, not a strict
+    minimum: e.g. strategy c) needs slightly less because it does not always
+    fill all the slots (A_c < 1).
+
+    Inputs:
+        n_slots         : satellite positions in the plane [-]
+        reliability     : dict with the reliability model
+        design_life_s   : design life [s]
+        commissioning_s : commissioning time [s]
+    Output:
+        launch rate [satellites/s]
+    """
+    def R_of_years(t_years):
+        return reliability_analytic(t_years * YEAR_S, **reliability)
+
+    e_up_s = YEAR_S * quad(R_of_years, commissioning_s / YEAR_S, design_life_s / YEAR_S,
+                           limit=200)[0]
+    return n_slots / e_up_s

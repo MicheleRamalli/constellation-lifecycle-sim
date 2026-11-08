@@ -66,9 +66,27 @@ REORDER_LEVEL = N_SPARES   # ASSUMPTION: provisional, one reorder per lost satel
 # Every live satellite (also dormant spares) orders its successor at age
 # DESIGN_LIFE - ORDER_TO_LAUNCH - COMMISSIONING, so the successor enters service
 # when it retires. No new parameter: it uses the values above.
+# ASSUMPTION: end of life known in advance; mission extensions beyond design life
+# are not modelled.
+
+# --- Replacement strategy d): launches at a fixed cadence ---
+# k satellites every T days after the initial deployment (first cadence launch at
+# last deployment batch + T); extra satellites stay in orbit as hot spares (H1-H4).
+# H5 ASSUMPTION: k satellites are always ready at each cadence date (production
+#    planned in advance, no order-to-launch delay).
+CADENCE_SATS_OPTIONS = (1, 2, 3)  # k values explored in the search of the minimum cadence
+
+# --- Mission requirement for the cadence search ---
+AVAIL_TARGET = 0.95      # ASSUMPTION: illustrative mission requirement (plane availability)
+AVAIL_CONFIDENCE = 0.95  # ASSUMPTION: illustrative mission requirement (fraction of runs)
+
+# --- Search settings (numerical, not physical) ---
+CADENCE_GRID_DAYS_PER_SAT = (90, 365, 15)  # sweep of T/k [days]: start, stop, step (rate ~1-4 sats/yr)
+SEEDS_CHECK = (43, 44)                     # extra seeds to check the sensitivity of T*
 
 # --- Simulation ---
 SIM_DURATION_YEARS = 15.0  # ASSUMPTION: reference mission horizon, to be reviewed
 DT_DAYS = 1.0              # fixed time step (project rule, CLAUDE.md)
 N_RUNS = 1000              # number of Monte Carlo runs
+N_RUNS_SWEEP = 1000        # Monte Carlo runs per point of the parameter sweeps in main.py
 SEED = 42                  # master seed of the Monte Carlo
