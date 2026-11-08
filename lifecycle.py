@@ -484,3 +484,72 @@ def time_to_full_operation(n_active, min_active, t_s):
     full = n_active >= min_active
     first = np.argmax(full, axis=1)  # index of the first True (0 if none)
     return np.where(full.any(axis=1), t_s[first], np.nan)
+
+
+# ---------------------------------------------------------------------------
+# Constellation of independent planes
+# ---------------------------------------------------------------------------
+
+def simulate_constellation(plane_simulator, plane_inputs, seed):
+    """Monte Carlo of a constellation of independent planes.
+
+    Every launch serves one plane, and spares, reorders and cadence are per
+    plane, so the planes are independent processes: the single-plane simulator
+    is called once per plane. Plane p uses the seed sequence [seed, p], so each
+    plane has its own reproducible random numbers, and run r of plane 1 is
+    independent of run r of plane 2.
+
+    Inputs:
+        plane_simulator : simulate_plane or simulate_fixed_cadence
+        plane_inputs    : list of dicts, one per plane, with all the inputs of
+                          plane_simulator except seed (same n_runs and time grid)
+        seed            : master seed [-]
+    Output: dict with
+        "t_s"        : time grid [s], shape (n_steps,)
+        "n_active"   : operational satellites per plane, shape (n_planes, n_runs, n_steps)
+        "n_launched" : satellites launched by the constellation, shape (n_runs, n_steps)
+        "n_failures", "n_retirements", "n_launch_failures", "n_spares_lost" :
+                       constellation totals per run, shape (n_runs,)
+    """
+    outs = [plane_simulator(seed=[seed, p], **inputs) for p, inputs in enumerate(plane_inputs)]
+    result = {"t_s": outs[0]["t_s"],
+              "n_active": np.stack([o["n_active"] for o in outs]),
+              "n_launched": sum(o["n_launched"].astype(int) for o in outs)}
+    for key in ["n_failures", "n_retirements", "n_launch_failures", "n_spares_lost"]:
+        result[key] = sum(o[key] for o in outs)
+    return result
+
+
+def constellation_revisit_series(n_active_planes, table_s):
+    """Revisit of the constellation at each step from the lookup table.
+
+    revisit(t) = table[n_1(t), ..., n_P(t)] (quasi-stationarity ASSUMPTION, params.py).
+    Inputs:
+        n_active_planes : operational satellites per plane, shape (n_planes, n_runs, n_steps)
+        table_s         : revisit [s] for every (n_1, ..., n_P), shape (S + 1,) * n_planes
+    Output:
+        revisit [s], shape (n_runs, n_steps)
+    """
+    return table_s[tuple(n_active_planes)]
+
+
+def constellation_availability(revisit_s, max_revisit_s, t_s, t_start_s):
+    """Fraction of time steps with revisit <= requirement, per run.
+
+    Inputs:
+        revisit_s     : revisit of the constellation [s], shape (n_runs, n_steps)
+        max_revisit_s : requirement [s]
+        t_s           : time grid [s]
+        t_start_s     : start of the averaging window [s] (end of deployment)
+    Output:
+        availability of each run [-], shape (n_runs,)
+    """
+    keep = t_s >= t_start_s
+    return np.mean(revisit_s[:, keep] <= max_revisit_s, axis=1)
+
+
+def time_to_requirement(revisit_s, max_revisit_s, t_s):
+    """First time at which revisit <= requirement, per run [s] (NaN if never)."""
+    ok = revisit_s <= max_revisit_s
+    first = np.argmax(ok, axis=1)
+    return np.where(ok.any(axis=1), t_s[first], np.nan)

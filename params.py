@@ -21,9 +21,13 @@ WEIBULL_THETA_YEARS = 2607.0   # scale parameter [years]
 # --- Mission ---
 DESIGN_LIFE_YEARS = 5.0  # ASSUMPTION: reference value, to be reviewed (no source yet)
 
-# --- Constellation geometry (one orbital plane for v0.1) ---
-N_SLOTS = 6  # ASSUMPTION: provisional, will come from the Walker constellation design
-MIN_ACTIVE = N_SLOTS  # ASSUMPTION: provisional, full plane required (coverage requirement not yet defined)
+# --- Constellation geometry ---
+# From the Walker search of coverage.py (smallest constellation meeting the revisit
+# requirement with ETA_MAX_DEG and MIN_ACCESS_S): Walker 2/4/0, star, SSO 500 km.
+N_PLANES = 2   # planes P (coverage.py Walker search)
+N_SLOTS = 4    # satellites per plane S (coverage.py Walker search)
+MIN_ACTIVE = N_SLOTS  # per-plane metric only; the constellation availability is defined
+                      # on the revisit (coverage.py lookup table)
 
 # --- Initial deployment in batches ---
 # ASSUMPTION inspired by IRIDE Eaglet II: 24 satellites deployed in 3 batches of 8,
@@ -38,8 +42,13 @@ MIN_ACTIVE = N_SLOTS  # ASSUMPTION: provisional, full plane required (coverage r
 # - ESA, "Italy's IRIDE completes Eaglet II constellation", 02/10/2026,
 #   https://www.esa.int/Applications/Observing_the_Earth/IRIDE/Italy_s_IRIDE_completes_Eaglet_II_constellation
 # The N_SLOTS + N_SPARES units are split as evenly as possible, larger batches first.
-DEPLOY_BATCHES = 3           # ASSUMPTION: as Eaglet II (3 batches)
+DEPLOY_BATCHES = 3           # ASSUMPTION: as Eaglet II (3 batches); used by the single-plane
+                             # analyses and tests of v0.1
 DEPLOY_INTERVAL_DAYS = 180.0 # ASSUMPTION: constant interval, rounded from the Eaglet II ~4 and ~6 months
+# Constellation deployment (D1): plane p (p = 0, 1, ...) is launched in one launch at
+# p * DEPLOY_INTERVAL_DAYS with its N_SLOTS + spares.
+# ASSUMPTION: one launch per plane (changing plane costs too much delta-v); interval
+# consistent with IRIDE Eaglet II batches.
 
 # --- Replacement strategy: launch on failure ---
 ORDER_TO_LAUNCH_DAYS = 365.0  # ASSUMPTION: provisional reference value, time from replacement order to launch (no source yet)
@@ -70,8 +79,10 @@ REORDER_LEVEL = N_SPARES   # ASSUMPTION: provisional, one reorder per lost satel
 # are not modelled.
 
 # --- Replacement strategy d): launches at a fixed cadence ---
-# k satellites every T days after the initial deployment (first cadence launch at
-# last deployment batch + T); extra satellites stay in orbit as hot spares (H1-H4).
+# k satellites every T days per plane (first cadence launch together with the plane's
+# deployment launch); extra satellites stay in orbit as hot spares (H1-H4).
+# ASSUMPTION: the cadence of plane 2 is shifted by T/2 (spreads production and launches
+# over time).
 # H5 ASSUMPTION: k satellites are always ready at each cadence date (production
 #    planned in advance, no order-to-launch delay).
 CADENCE_SATS_OPTIONS = (1, 2, 3)  # k values explored in the search of the minimum cadence
@@ -81,7 +92,8 @@ AVAIL_TARGET = 0.95      # ASSUMPTION: illustrative mission requirement (plane a
 AVAIL_CONFIDENCE = 0.95  # ASSUMPTION: illustrative mission requirement (fraction of runs)
 
 # --- Search settings (numerical, not physical) ---
-CADENCE_GRID_DAYS_PER_SAT = (90, 365, 15)  # sweep of T/k [days]: start, stop, step (rate ~1-4 sats/yr)
+CADENCE_GRID_DAYS_PER_SAT = (90, 590, 20)  # sweep of T/k per plane [days]: start, stop, step
+                                           # (per-plane rate ~0.6-4 sats/yr; reference ~0.85)
 SEEDS_CHECK = (43, 44)                     # extra seeds to check the sensitivity of T*
 
 # --- Earth constants (coverage.py) ---
@@ -107,10 +119,18 @@ RAAN_SPREAD_DEG = 180.0  # ASSUMPTION: Walker star (planes over 180 deg of RAAN)
 # ASSUMPTION: spherical Earth for the coverage geometry.
 ETA_MAX_DEG = 30.0              # ASSUMPTION: sensor half-angle (max off-nadir); no source for Eaglet II
 ETA_SWEEP_DEG = (15.0, 30.0, 45.0)  # sensitivity sweep of ETA_MAX_DEG [deg]
+MIN_ACCESS_S = 30.0             # ASSUMPTION: an optical sensor needs time to point and acquire
+MIN_ACCESS_SWEEP_S = (0.0, 15.0, 30.0, 45.0, 60.0)  # sensitivity sweep of MIN_ACCESS_S [s]
 
 # --- Revisit requirement and Walker search (coverage.py) ---
 REVISIT_MAX_HOURS = 12.0   # ASSUMPTION: illustrative mission requirement (max revisit)
 REVISIT_LAT_DEG = 45.0     # ASSUMPTION: illustrative mission requirement (latitude, ~Italy)
+REVISIT_MEAN_HOURS = 6.0   # ASSUMPTION: illustrative alternative requirement (mean revisit)
+# ASSUMPTION (quasi-stationarity): at each time the revisit of the constellation is the
+# 30-day revisit of its current configuration (n_1, n_2) from the lookup table; valid
+# because the configuration changes over months while the revisit is hours.
+# ASSUMPTION: after a loss the satellites left in a plane are re-spaced evenly at once
+# (R1, instantaneous rephasing; a real in-plane drift takes weeks).
 WALKER_P_RANGE = (1, 6)    # planes explored in the Walker search (numerical setting)
 WALKER_S_RANGE = (2, 8)    # satellites per plane explored (numerical setting)
 

@@ -130,12 +130,34 @@ def test_walker_elements_small_case():
 
 
 def test_gaps_on_synthetic_series():
-    """Known series: accesses at steps 2-3, 7, 12-13 -> gaps 3 and 4 steps."""
+    """Boolean series: accesses at steps 2-3, 7, 12-13 -> gaps 3 and 4 steps.
+
+    For a boolean series the crossings are at mid-step, so the gaps keep their
+    length in steps and the starts move back by half a step.
+    """
     vis = np.zeros(16, dtype=bool)
     vis[[2, 3, 7, 12, 13]] = True
     starts, gaps = cv.access_starts_and_gaps(vis, 10.0)
-    np.testing.assert_array_equal(starts, [20.0, 70.0, 120.0])
+    np.testing.assert_array_equal(starts, [15.0, 65.0, 115.0])
     np.testing.assert_array_equal(gaps, [30.0, 40.0])
+
+
+def test_interpolated_entry_and_exit_times():
+    """Piecewise-linear margin with known zero crossings (dt = 10 s).
+
+    m(t) = 1 - |t - t_c| / h around each access centre t_c (half-width h), so the
+    access goes exactly from t_c - h to t_c + h. Accesses: centre 103 s, h = 37 s
+    and centre 412 s, h = 21 s -> entries 66 and 391 s, gap 391 - 140 = 251 s.
+    The interpolation recovers them to rounding error; counting steps would not.
+    """
+    t = np.arange(0.0, 600.0, 10.0)
+    m = np.maximum(1 - np.abs(t - 103.0) / 37.0, 1 - np.abs(t - 412.0) / 21.0)
+    starts, gaps = cv.access_starts_and_gaps(m, 10.0)
+    np.testing.assert_allclose(starts, [66.0, 391.0], atol=1e-9)
+    np.testing.assert_allclose(gaps, [251.0], atol=1e-9)
+    # Second access lasts 42 s: dropped with a 45 s minimum, kept with 40 s
+    assert len(cv.access_starts_and_gaps(m, 10.0, min_access_s=45.0)[0]) == 1
+    assert len(cv.access_starts_and_gaps(m, 10.0, min_access_s=40.0)[0]) == 2
 
 
 def access_intervals(inc_rad, n_sats, point_lat_deg, step_s=10.0, days=3.0):
@@ -144,8 +166,8 @@ def access_intervals(inc_rad, n_sats, point_lat_deg, step_s=10.0, days=3.0):
     u0 = 2 * np.pi * np.arange(n_sats) / n_sats
     lam, _ = cv.footprint_from_sensor(ALT_M, np.radians(params.ETA_MAX_DEG))
     points, _ = cv.grid_directions(np.array([point_lat_deg]), np.array([0.0]))
-    vis = cv.visibility(t, np.zeros(n_sats), u0, A_M, inc_rad, lam, points)
-    starts, _ = cv.access_starts_and_gaps(vis[:, 0], step_s)
+    margin = cv.access_margin(t, np.zeros(n_sats), u0, A_M, inc_rad, lam, points)
+    starts, _ = cv.access_starts_and_gaps(margin[:, 0], step_s)
     return np.diff(starts), step_s
 
 
@@ -189,7 +211,8 @@ def test_degraded_plane_counts():
 def test_walker_search_picks_smallest_feasible_total():
     """Loose requirement -> smallest T (1 plane x 2 sats); impossible one -> None."""
     kwargs = dict(eta_rad=np.radians(params.ETA_MAX_DEG), step_s=30.0, duration_s=2 * 86400.0,
-                  p_range=(1, 2), s_range=(2, 3), raan_spread_rad=np.pi)
+                  p_range=(1, 2), s_range=(2, 3), raan_spread_rad=np.pi,
+                  min_access_s=0.0)  # search logic only: no minimum access
     best, rows = cv.walker_search(max_revisit_s=1e9, **kwargs)
     assert best == (1, 2, 0)
     assert all(r[0] * r[1] == 2 for r in rows)  # stopped at the first total T
@@ -203,3 +226,44 @@ def test_min_active_from_table():
     assert cv.min_active_from_table(np.array([np.inf, 20, 13, 13, 7]) * hours, 12 * hours) == 4
     assert cv.min_active_from_table(np.array([np.inf, 20, 11, 9]) * hours, 12 * hours) == 2
     assert cv.min_active_from_table(np.array([np.inf, 20, 13]) * hours, 12 * hours) == 3
+
+
+def test_quadratic_crossing_on_parabolic_margin():
+    """Parabolic margin m(t) = 1 - ((t - 100) / 23)^2 (dt = 10 s): access 77 to 123 s.
+
+    The parabola through three samples is exact for a parabolic margin, while a
+    straight line between two samples would give a shorter access.
+    """
+    t = np.arange(0.0, 300.0, 10.0)
+    m = 1.0 - ((t - 100.0) / 23.0)**2
+    _, _ = cv.access_starts_and_gaps(m, 10.0)
+    k_in, k_out = 7, 12   # m[7] < 0 <= m[8], m[12] >= 0 > m[13]
+    assert np.isclose(cv.crossing_time(m, k_in) * 10.0, 77.0, atol=1e-9)
+    assert np.isclose(cv.crossing_time(m, k_out) * 10.0, 123.0, atol=1e-9)
+    linear_entry = (k_in + m[k_in] / (m[k_in] - m[k_in + 1])) * 10.0
+    assert abs(linear_entry - 77.0) > 0.3   # the linear estimate is off by 0.42 s
+
+
+def test_min_access_merges_gaps():
+    """Boolean series: accesses at steps 2-4 (30 s), 8 (10 s), 13-15 (30 s), dt = 10 s.
+
+    min 0 s : gaps 3 and 4 steps; min 30 s: the 10 s access is dropped and the
+    gaps merge into one of 8 steps (from the exit at 4.5 to the entry at 12.5).
+    """
+    vis = np.zeros(20, dtype=bool)
+    vis[[2, 3, 4, 8, 13, 14, 15]] = True
+    _, gaps = cv.access_starts_and_gaps(vis, 10.0)
+    np.testing.assert_array_equal(gaps, [30.0, 40.0])
+    starts, gaps = cv.access_starts_and_gaps(vis, 10.0, min_access_s=30.0)
+    np.testing.assert_array_equal(starts, [15.0, 125.0])
+    np.testing.assert_array_equal(gaps, [80.0])
+
+
+def test_integer_time_step_gives_same_result():
+    """Regression: an integer dt must not truncate the interpolated times."""
+    t = np.arange(0.0, 600.0, 10.0)
+    m = np.maximum(1 - np.abs(t - 103.0) / 37.0, 1 - np.abs(t - 412.0) / 21.0)
+    starts_f, gaps_f = cv.access_starts_and_gaps(m, 10.0)
+    starts_i, gaps_i = cv.access_starts_and_gaps(m, 10)
+    np.testing.assert_array_equal(starts_f, starts_i)
+    np.testing.assert_array_equal(gaps_f, gaps_i)

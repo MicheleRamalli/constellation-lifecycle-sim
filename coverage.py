@@ -9,8 +9,11 @@ Model:
   point is <= lambda, the Earth central angle of the sensor footprint
   (Wertz & Larson, Space Mission Analysis and Design, 3rd ed., space mission
   geometry; to be checked on the reference).
-- Revisit (gap) = time from the end of one access to the start of the next,
-  measured on the time grid (error <= one step).
+- Revisit (gap) = time from the end of one useful access to the start of the
+  next. Entry/exit times are interpolated where the angular distance crosses
+  lambda (parabola through three samples). A useful access is a continuous
+  access of ONE satellite lasting at least MIN_ACCESS_S; the useful accesses of
+  all satellites are then merged.
 - Geometric coverage only: solar illumination not modelled (ASSUMPTION).
 
 Walker notation (Walker J.G. 1984, "Satellite constellations", JBIS 37; to be
@@ -171,8 +174,12 @@ def grid_directions(lat_deg, lon_deg):
     return vectors, np.degrees(lat).ravel()
 
 
-def visibility(t_s, raan0, u0, a_m, inc_rad, lambda_rad, points, chunk=500):
-    """Access of each ground point by at least one satellite at each time.
+def access_margin(t_s, raan0, u0, a_m, inc_rad, lambda_rad, points, chunk=500):
+    """Access margin of each ground point at each time.
+
+    m(t) = max over the satellites of [cos(angular distance to the sub-satellite
+    point) - cos(lambda)]. The point is accessed when m >= 0. m is continuous in
+    time, so the entry and exit times can be interpolated where it crosses zero.
 
     Inputs:
         t_s, raan0, u0, a_m, inc_rad : as satellite_directions
@@ -180,77 +187,157 @@ def visibility(t_s, raan0, u0, a_m, inc_rad, lambda_rad, points, chunk=500):
         points     : ground unit vectors, shape (n_p, 3)
         chunk      : time steps per block (memory control)
     Output:
-        boolean array, shape (n_t, n_p)
+        margin [-], float32 array, shape (n_t, n_p)
     """
     cos_lambda = np.cos(lambda_rad)
-    vis = np.zeros((len(t_s), len(points)), dtype=bool)
+    margin = np.zeros((len(t_s), len(points)), dtype=np.float32)
     for start in range(0, len(t_s), chunk):
         sat = satellite_directions(t_s[start:start + chunk], raan0, u0, a_m, inc_rad)
         cos_angle = sat @ points.T                          # (n_c, n_sat, n_p)
-        vis[start:start + chunk] = np.any(cos_angle >= cos_lambda, axis=1)
-    return vis
+        margin[start:start + chunk] = np.max(cos_angle, axis=1) - cos_lambda
+    return margin
 
 
 # ---------------------------------------------------------------------------
 # Revisit
 # ---------------------------------------------------------------------------
 
-def access_starts_and_gaps(vis_column, dt_s):
-    """Access start times and complete gaps of one ground point.
+def crossing_time(m, k):
+    """Zero crossing of the series m between steps k and k + 1, in units of steps.
 
-    A gap goes from the first step without access to the next step with access.
-    Gaps before the first access and after the last one are incomplete and ignored.
-    An access already in progress at t = 0 is truncated: its true start is
-    unknown, so it is not reported as a start (its end still opens a gap).
+    m[k] and m[k + 1] have opposite signs. A parabola is fitted through three
+    samples (k - 1, k, k + 1, or k, k + 1, k + 2 at the start of the series) and
+    its root inside [k, k + 1] is returned: near a short access the margin is
+    curved (peak of the pass) and a straight line would underestimate the access
+    duration. Falls back to linear interpolation if fewer than three samples
+    exist or the parabola has no root in the interval.
     Inputs:
-        vis_column : boolean access series, shape (n_t,)
-        dt_s       : time step [s]
-    Outputs:
-        starts_s : start times of the accesses [s]
-        gaps_s   : durations of the complete gaps [s]
+        m : series, shape (n,)
+        k : step index (int or integer array)
+    Output:
+        crossing position [steps], same shape as k
     """
-    v = vis_column.astype(np.int8)
-    d = np.diff(v)
-    starts = np.nonzero(d == 1)[0] + 1   # first step of an access
-    ends = np.nonzero(d == -1)[0] + 1    # first step after an access
-    # complete gap: an end followed by a later start
-    gaps = [starts[starts > e][0] - e for e in ends if np.any(starts > e)]
-    return starts * dt_s, np.array(gaps, dtype=float) * dt_s
+    scalar = np.isscalar(k)
+    k = np.atleast_1d(k)
+    linear = k + m[k] / (m[k] - m[k + 1])
+    x0 = np.where(k >= 1, k - 1, k)
+    valid = x0 + 2 < len(m)
+    x0 = np.minimum(x0, len(m) - 3)
+    y0, y1, y2 = m[x0], m[x0 + 1], m[x0 + 2]
+    c = 0.5 * (y2 - 2.0 * y1 + y0)          # p(x) = y0 + b x + c x^2, x = step - x0
+    b = y1 - y0 - c
+    disc = b * b - 4.0 * c * y0
+    usable = valid & (np.abs(c) > 1e-15) & (disc >= 0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        sq = np.sqrt(np.maximum(disc, 0.0))
+        x1 = x0 + (-b - sq) / (2.0 * c)
+        x2 = x0 + (-b + sq) / (2.0 * c)
+    ok1 = usable & (x1 >= k) & (x1 <= k + 1)
+    ok2 = usable & (x2 >= k) & (x2 <= k + 1)
+    result = np.where(ok1, x1, np.where(ok2, x2, linear))
+    return result[0] if scalar else result
 
 
-def revisit_by_latitude(vis, point_lat_deg, dt_s):
-    """Max and mean revisit for each latitude of the grid.
+def access_intervals(margin_column, dt_s, min_access_s=0.0):
+    """Access intervals of one ground point by ONE satellite (or one margin series).
 
-    max  = largest complete gap over all longitudes (inf if a point has < 2 accesses)
-    mean = total gap time / number of gaps, pooled over the longitudes
+    An access is a run of consecutive steps with margin >= 0; entry and exit
+    times are interpolated where the margin crosses zero (crossing_time).
+    Accesses shorter than min_access_s are discarded. An access in progress at
+    the first (last) step is truncated: its entry (exit) is set to that step.
+    For a boolean series (no margin values) the crossings are at mid-step.
     Inputs:
-        vis           : boolean access array, shape (n_t, n_p)
-        point_lat_deg : latitude of each point [deg], shape (n_p,)
+        margin_column : margin series (see access_margin) or boolean series, shape (n_t,)
         dt_s          : time step [s]
+        min_access_s  : minimum useful access duration [s]
     Outputs:
-        lats [deg], max_revisit_s, mean_revisit_s, each shape (n_lat,)
+        entry_s, exit_s : interval bounds [s]
+        truncated       : True if the entry is the first step (true entry unknown)
     """
-    lats = np.unique(point_lat_deg)
-    max_s = np.zeros(len(lats))
-    mean_s = np.zeros(len(lats))
-    for i, lat in enumerate(lats):
-        all_gaps, worst = [], 0.0
-        for p in np.nonzero(point_lat_deg == lat)[0]:
-            starts, gaps = access_starts_and_gaps(vis[:, p], dt_s)
-            if len(starts) < 2:
-                worst = np.inf
-            elif len(gaps) > 0:
-                worst = max(worst, gaps.max())
-            all_gaps.append(gaps)
-        pooled = np.concatenate(all_gaps)
-        max_s[i] = worst
-        mean_s[i] = pooled.mean() if len(pooled) > 0 else np.inf
-    return lats, max_s, mean_s
+    dt_s = float(dt_s)  # an integer dt would make the time arrays integer and truncate them
+    is_bool = margin_column.dtype == bool
+    m = np.where(margin_column, 1.0, -1.0) if is_bool else np.asarray(margin_column, float)
+    n = len(m)
+    inside = np.concatenate([[0], (m >= 0).astype(np.int8), [0]])
+    d = np.diff(inside)
+    first_in = np.nonzero(d == 1)[0]    # first step of each access
+    first_out = np.nonzero(d == -1)[0]  # first step after each access
+
+    def crossings(k):
+        if is_bool:
+            return k + 0.5
+        return crossing_time(m, k)
+
+    entry_s = first_in * dt_s
+    has_entry = first_in > 0
+    entry_s[has_entry] = crossings(first_in[has_entry] - 1) * dt_s
+    exit_s = (first_out - 1) * dt_s
+    has_exit = first_out < n
+    exit_s[has_exit] = crossings(first_out[has_exit] - 1) * dt_s
+
+    keep = exit_s - entry_s >= min_access_s
+    return entry_s[keep], exit_s[keep], ~has_entry[keep]
+
+
+def merge_intervals(entry_s, exit_s, truncated):
+    """Union of access intervals (e.g. of several satellites) of one ground point.
+
+    Overlapping or touching intervals are merged. A merged interval is
+    truncated if its first interval is.
+    Outputs: merged entry_s, exit_s, truncated (sorted by entry)
+    """
+    if len(entry_s) == 0:
+        return entry_s, exit_s, truncated
+    order = np.argsort(entry_s, kind="stable")
+    e, x, tr = entry_s[order], exit_s[order], truncated[order]
+    running_exit = np.maximum.accumulate(x)
+    new_group = np.concatenate([[True], e[1:] > running_exit[:-1]])
+    first = np.nonzero(new_group)[0]
+    return e[first], np.maximum.reduceat(x, first), tr[first]
+
+
+def starts_and_gaps(entry_s, exit_s, truncated):
+    """Start times (truncated excluded) and complete gaps of sorted, disjoint intervals [s]."""
+    return entry_s[~truncated], entry_s[1:] - exit_s[:-1]
+
+
+def access_starts_and_gaps(margin_column, dt_s, min_access_s=0.0):
+    """Access start times and complete gaps of one margin (or boolean) series.
+
+    Convenience for one series: access_intervals, then starts_and_gaps.
+    A gap goes from the exit of one useful access to the entry of the next;
+    gaps before the first and after the last access are ignored.
+    Outputs: starts_s [s], gaps_s [s]
+    """
+    return starts_and_gaps(*access_intervals(margin_column, dt_s, min_access_s))
+
+
+def aggregate_revisit(starts_per_point, gaps_per_point):
+    """Max and mean revisit over the points of one latitude.
+
+    max  = largest complete gap over the points (inf if a point has < 2 accesses)
+    mean = total gap time / number of gaps, pooled over the points
+    Outputs: max_s, mean_s [s]
+    """
+    worst = 0.0
+    for starts, gaps in zip(starts_per_point, gaps_per_point):
+        if len(starts) < 2:
+            worst = np.inf
+        elif len(gaps) > 0:
+            worst = max(worst, gaps.max())
+    pooled = np.concatenate(gaps_per_point)
+    return worst, (pooled.mean() if len(pooled) > 0 else np.inf)
 
 
 def constellation_revisit(raan0, u0, lat_deg, eta_rad, step_s, duration_s,
-                          lon_step_deg=params.COV_LON_STEP_DEG):
+                          lon_step_deg=params.COV_LON_STEP_DEG,
+                          min_access_s=params.MIN_ACCESS_S):
     """Max and mean revisit vs latitude for a set of satellites at the reference SSO.
+
+    Useful access = a continuous access of ONE satellite lasting at least
+    min_access_s (the sensor of one satellite must point and acquire). The
+    accesses of each satellite are filtered first, then merged over the
+    satellites (merge_intervals); the gaps are measured on the merged intervals.
 
     Inputs:
         raan0, u0    : initial RAAN and argument of latitude [rad], shape (n_sat,)
@@ -259,6 +346,7 @@ def constellation_revisit(raan0, u0, lat_deg, eta_rad, step_s, duration_s,
         step_s       : time step [s]
         duration_s   : propagation duration [s]
         lon_step_deg : longitude step [deg]
+        min_access_s : minimum useful access duration [s]
     Outputs: lats [deg], max_revisit_s, mean_revisit_s
     """
     a_m = R_E + params.ALT_KM * 1e3
@@ -268,13 +356,28 @@ def constellation_revisit(raan0, u0, lat_deg, eta_rad, step_s, duration_s,
     lats = np.atleast_1d(lat_deg).astype(float)
     max_s = np.full(len(lats), np.inf)
     mean_s = np.full(len(lats), np.inf)
-    if len(np.ravel(raan0)) == 0:
+    raan0, u0 = np.ravel(raan0), np.ravel(u0)
+    if len(raan0) == 0:
         return lats, max_s, mean_s
-    # One latitude at a time: the access array of the full grid would not fit in memory
+    lons = np.arange(0.0, 360.0, lon_step_deg)
+    block = max(1, int(2e7 // len(t_s)))  # longitudes per block (memory control)
     for i, lat in enumerate(lats):
-        points, point_lat = grid_directions(np.array([lat]), np.arange(0.0, 360.0, lon_step_deg))
-        vis = visibility(t_s, np.ravel(raan0), np.ravel(u0), a_m, inc, lam, points)
-        _, max_s[i:i + 1], mean_s[i:i + 1] = revisit_by_latitude(vis, point_lat, step_s)
+        starts_list, gaps_list = [], []
+        for b0 in range(0, len(lons), block):
+            points, _ = grid_directions(np.array([lat]), lons[b0:b0 + block])
+            intervals = [[] for _ in range(len(points))]
+            for j in range(len(raan0)):   # one satellite at a time
+                margin = access_margin(t_s, raan0[j:j + 1], u0[j:j + 1], a_m, inc, lam, points)
+                for p in range(len(points)):
+                    intervals[p].append(access_intervals(margin[:, p], step_s, min_access_s))
+            for p in range(len(points)):
+                entry = np.concatenate([iv[0] for iv in intervals[p]])
+                exit_ = np.concatenate([iv[1] for iv in intervals[p]])
+                trunc = np.concatenate([iv[2] for iv in intervals[p]])
+                starts, gaps = starts_and_gaps(*merge_intervals(entry, exit_, trunc))
+                starts_list.append(starts)
+                gaps_list.append(gaps)
+        max_s[i], mean_s[i] = aggregate_revisit(starts_list, gaps_list)
     return lats, max_s, mean_s
 
 
@@ -283,7 +386,8 @@ def constellation_revisit(raan0, u0, lat_deg, eta_rad, step_s, duration_s,
 # ---------------------------------------------------------------------------
 
 def walker_search(eta_rad, step_s, duration_s, p_range, s_range, raan_spread_rad,
-                  lat_deg=params.REVISIT_LAT_DEG, max_revisit_s=params.REVISIT_MAX_HOURS * 3600):
+                  lat_deg=params.REVISIT_LAT_DEG, max_revisit_s=params.REVISIT_MAX_HOURS * 3600,
+                  min_access_s=params.MIN_ACCESS_S):
     """Smallest Walker P/S/F meeting the max-revisit requirement at one latitude.
 
     Explores P in p_range, S in s_range, F in 0..P-1. Picks the smallest total
@@ -301,8 +405,8 @@ def walker_search(eta_rad, step_s, duration_s, p_range, s_range, raan_spread_rad
         group = []
         for n_planes, sats, phasing in [c for c in configs if c[0] * c[1] == total]:
             raan0, u0 = walker_elements(n_planes, sats, phasing, raan_spread_rad)
-            _, max_s, mean_s = constellation_revisit(raan0, u0, lat_deg, eta_rad,
-                                                     step_s, duration_s)
+            _, max_s, mean_s = constellation_revisit(raan0, u0, lat_deg, eta_rad, step_s,
+                                                     duration_s, min_access_s=min_access_s)
             group.append((n_planes, sats, phasing, max_s[0], mean_s[0]))
         rows.extend(group)
         feasible = [r for r in group if r[3] <= max_revisit_s]
@@ -338,6 +442,40 @@ def degraded_plane(raan0, u0, plane, n_left, rephase, slots_left=None):
             raan_list.append(raan0[p, list(slots_left)])
             u_list.append(u0[p, list(slots_left)])
     return np.concatenate(raan_list), np.concatenate(u_list)
+
+
+def rephased_constellation(raan0, u0, n_per_plane):
+    """Elements with n_per_plane[p] satellites in plane p, re-spaced evenly (R1).
+
+    ASSUMPTION: rephasing is instantaneous (in reality an in-plane drift takes weeks).
+    Inputs:
+        raan0, u0   : Walker elements, shape (P, S)
+        n_per_plane : satellites left in each plane, length P
+    Outputs: raan0, u0 as flat arrays of the remaining satellites
+    """
+    raan_list, u_list = [], []
+    for p, n in enumerate(n_per_plane):
+        raan_list.append(np.full(n, raan0[p, 0]))
+        u_list.append(u0[p, 0] + 2.0 * np.pi * np.arange(n) / max(n, 1))
+    return np.concatenate(raan_list), np.concatenate(u_list)
+
+
+def revisit_table_planes(n_planes, sats_per_plane, phasing, eta_rad, step_s, duration_s,
+                         raan_spread_rad, lat_deg=params.REVISIT_LAT_DEG):
+    """Full lookup table revisit(n_1, ..., n_P) at one latitude, R1 rephasing.
+
+    One entry for every combination of operational satellites per plane,
+    n_p = 0..S: (S + 1)^P configurations (25 for 2/4).
+    Outputs: max_s, mean_s [s], arrays of shape (S + 1,) * P (inf if never revisited)
+    """
+    raan0, u0 = walker_elements(n_planes, sats_per_plane, phasing, raan_spread_rad)
+    shape = (sats_per_plane + 1,) * n_planes
+    max_s, mean_s = np.full(shape, np.inf), np.full(shape, np.inf)
+    for n_per_plane in itertools.product(range(sats_per_plane + 1), repeat=n_planes):
+        r0, uu = rephased_constellation(raan0, u0, n_per_plane)
+        _, mx, mn = constellation_revisit(r0, uu, lat_deg, eta_rad, step_s, duration_s)
+        max_s[n_per_plane], mean_s[n_per_plane] = mx[0], mn[0]
+    return max_s, mean_s
 
 
 def revisit_tables(n_planes, sats_per_plane, phasing, eta_rad, step_s, duration_s,
@@ -388,6 +526,7 @@ def coverage_key():
                      *params.ETA_SWEEP_DEG, params.REVISIT_MAX_HOURS, params.REVISIT_LAT_DEG,
                      *params.WALKER_P_RANGE, *params.WALKER_S_RANGE, params.COV_STEP_S,
                      params.COV_DURATION_DAYS, *params.COV_LAT_GRID_DEG, params.COV_LON_STEP_DEG,
+                     params.MIN_ACCESS_S, *params.MIN_ACCESS_SWEEP_S,
                      MU, R_E, OMEGA_E, J2, params.TROPICAL_YEAR_DAYS])
 
 
@@ -416,6 +555,25 @@ def build_coverage_data():
     table = revisit_tables(n_planes, sats, phasing, eta, step_s, duration_s, spread)
     data.update({f"table_{k}": v for k, v in table.items()})
     raan0, u0 = walker_elements(n_planes, sats, phasing, spread)
+    data["table_planes_max_s"], data["table_planes_mean_s"] = revisit_table_planes(
+        n_planes, sats, phasing, eta, step_s, duration_s, spread)
+
+    # Sensitivity to the minimum access duration: chosen Walker, and smallest
+    # Walker meeting the requirement with the largest minimum access of the sweep
+    sweep_max, sweep_mean = [], []
+    for min_access in params.MIN_ACCESS_SWEEP_S:
+        _, mx, mn = constellation_revisit(raan0, u0, params.REVISIT_LAT_DEG, eta, step_s,
+                                          duration_s, min_access_s=min_access)
+        sweep_max.append(mx[0])
+        sweep_mean.append(mn[0])
+    data["min_access_sweep_s"] = np.array(params.MIN_ACCESS_SWEEP_S)
+    data["min_access_sweep_max_s"] = np.array(sweep_max)
+    data["min_access_sweep_mean_s"] = np.array(sweep_mean)
+    walker_long, _ = walker_search(eta, step_s, duration_s, params.WALKER_P_RANGE,
+                                   params.WALKER_S_RANGE, spread,
+                                   min_access_s=max(params.MIN_ACCESS_SWEEP_S))
+    data["best_walker_longest_access"] = np.array(walker_long if walker_long else (0, 0, 0))
+
     for eta_deg in params.ETA_SWEEP_DEG:
         _, mx, mn = constellation_revisit(raan0, u0, lat_grid, np.radians(eta_deg), step_s, duration_s)
         data[f"profile_max_s_eta{eta_deg:.0f}"] = mx
