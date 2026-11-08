@@ -1,0 +1,449 @@
+"""Coverage of a Walker constellation in sun-synchronous orbit: revisit time.
+
+Model:
+- Circular orbits, two-body + J2 secular rates of RAAN and argument of
+  latitude u = omega + M (Vallado, Fundamentals of Astrodynamics and
+  Applications, 4th ed. 2013; to be checked on the reference).
+- Spherical Earth rotating at OMEGA_EARTH; Greenwich angle 0 at t = 0.
+- A ground point is accessed when its angular distance from the sub-satellite
+  point is <= lambda, the Earth central angle of the sensor footprint
+  (Wertz & Larson, Space Mission Analysis and Design, 3rd ed., space mission
+  geometry; to be checked on the reference).
+- Revisit (gap) = time from the end of one access to the start of the next,
+  measured on the time grid (error <= one step).
+- Geometric coverage only: solar illumination not modelled (ASSUMPTION).
+
+Walker notation (Walker J.G. 1984, "Satellite constellations", JBIS 37; to be
+checked on the reference): T = P * S satellites, P planes with RAAN spaced by
+raan_spread / P, S satellites per plane spaced by 360/S deg, phase offset
+F * 360 / T deg between adjacent planes.
+
+All angles in rad and times in s inside the functions.
+"""
+
+import itertools
+import os
+
+import numpy as np
+
+import params
+
+MU = params.MU_EARTH
+R_E = params.R_EARTH
+OMEGA_E = params.OMEGA_EARTH
+J2 = params.J2_EARTH
+
+
+# ---------------------------------------------------------------------------
+# Orbit
+# ---------------------------------------------------------------------------
+
+def mean_motion(a_m):
+    """Keplerian mean motion n = sqrt(mu / a^3) [rad/s] for semi-major axis a [m]."""
+    return np.sqrt(MU / a_m**3)
+
+
+def j2_secular_rates(a_m, inc_rad):
+    """Secular J2 rates of a circular orbit.
+
+    Omega_dot = -(3/2) n J2 (R/a)^2 cos i
+    u_dot     = M_dot + omega_dot = n [1 + (3/2) J2 (R/a)^2 (4 cos^2 i - 1)]
+    (sum of omega_dot = (3/4) n J2 (R/a)^2 (5 cos^2 i - 1) and
+     M_dot = n [1 + (3/4) J2 (R/a)^2 (3 cos^2 i - 1)] for e = 0).
+
+    Inputs:
+        a_m     : semi-major axis [m]
+        inc_rad : inclination [rad]
+    Outputs:
+        raan_dot : RAAN rate [rad/s]
+        u_dot    : argument-of-latitude rate [rad/s]
+    """
+    n = mean_motion(a_m)
+    k = 1.5 * J2 * (R_E / a_m)**2
+    raan_dot = -k * n * np.cos(inc_rad)
+    u_dot = n * (1.0 + k * (4.0 * np.cos(inc_rad)**2 - 1.0))
+    return raan_dot, u_dot
+
+
+def sso_inclination(a_m):
+    """Sun-synchronous inclination [rad] of a circular orbit of semi-major axis a [m].
+
+    Condition: Omega_dot = 2 pi / tropical year, solved for cos i.
+    """
+    raan_dot_sso = 2.0 * np.pi / (params.TROPICAL_YEAR_DAYS * params.SECONDS_PER_DAY)
+    cos_i = -raan_dot_sso / (1.5 * mean_motion(a_m) * J2 * (R_E / a_m)**2)
+    return np.arccos(cos_i)
+
+
+def nodal_period(a_m, inc_rad):
+    """Nodal period 2 pi / u_dot [s] (time between two ascending node crossings)."""
+    return 2.0 * np.pi / j2_secular_rates(a_m, inc_rad)[1]
+
+
+# ---------------------------------------------------------------------------
+# Footprint geometry (spherical Earth)
+# ---------------------------------------------------------------------------
+
+def earth_angular_radius(alt_m):
+    """Angular radius rho of the Earth seen from altitude h: sin rho = R / (R + h) [rad]."""
+    return np.arcsin(R_E / (R_E + alt_m))
+
+
+def footprint_from_elevation(alt_m, eps_rad):
+    """Footprint for a minimum elevation angle eps.
+
+    sin eta = cos eps sin rho (nadir angle), lambda = pi/2 - eta - eps.
+    Outputs: lambda (Earth central angle) [rad], eta (nadir angle) [rad]
+    """
+    eta = np.arcsin(np.cos(eps_rad) * np.sin(earth_angular_radius(alt_m)))
+    return np.pi / 2 - eta - eps_rad, eta
+
+
+def footprint_from_sensor(alt_m, eta_rad):
+    """Footprint for a sensor half-angle eta (max off-nadir).
+
+    Same relation solved for eps: cos eps = sin eta / sin rho; lambda = pi/2 - eta - eps.
+    Outputs: lambda (Earth central angle) [rad], eps (elevation at the edge) [rad]
+    """
+    sin_rho = np.sin(earth_angular_radius(alt_m))
+    if np.sin(eta_rad) > sin_rho:
+        raise ValueError("Sensor half-angle beyond the Earth horizon")
+    eps = np.arccos(np.sin(eta_rad) / sin_rho)
+    return np.pi / 2 - eta_rad - eps, eps
+
+
+# ---------------------------------------------------------------------------
+# Constellation and propagation
+# ---------------------------------------------------------------------------
+
+def walker_elements(n_planes, sats_per_plane, phasing, raan_spread_rad):
+    """Initial RAAN and argument of latitude of a Walker P/S/F constellation.
+
+    Inputs:
+        n_planes        : P [-]
+        sats_per_plane  : S [-]
+        phasing         : F [-], 0 <= F < P
+        raan_spread_rad : RAAN spread of the planes [rad] (2 pi delta, pi star)
+    Outputs:
+        raan0, u0 : [rad], shape (P, S)
+    """
+    p = np.arange(n_planes)[:, None]
+    s = np.arange(sats_per_plane)[None, :]
+    n_total = n_planes * sats_per_plane
+    raan0 = np.broadcast_to(p * raan_spread_rad / n_planes, (n_planes, sats_per_plane)).copy()
+    u0 = 2.0 * np.pi * s / sats_per_plane + 2.0 * np.pi * phasing * p / n_total
+    return raan0, u0
+
+
+def satellite_directions(t_s, raan0, u0, a_m, inc_rad):
+    """Unit vectors of the satellites in the Earth-fixed frame.
+
+    r_ECI = [cos W cos u - sin W sin u cos i, sin W cos u + cos W sin u cos i, sin u sin i],
+    then rotation by -OMEGA_E t about z (Greenwich angle 0 at t = 0).
+
+    Inputs:
+        t_s           : times [s], shape (n_t,)
+        raan0, u0     : initial RAAN and argument of latitude [rad], shape (n_sat,)
+        a_m, inc_rad  : semi-major axis [m], inclination [rad] (same for all)
+    Output:
+        unit vectors, shape (n_t, n_sat, 3)
+    """
+    raan_dot, u_dot = j2_secular_rates(a_m, inc_rad)
+    t = np.asarray(t_s)[:, None]
+    raan = raan0[None, :] + raan_dot * t - OMEGA_E * t  # RAAN measured from Greenwich
+    u = u0[None, :] + u_dot * t
+    ci, si = np.cos(inc_rad), np.sin(inc_rad)
+    x = np.cos(raan) * np.cos(u) - np.sin(raan) * np.sin(u) * ci
+    y = np.sin(raan) * np.cos(u) + np.cos(raan) * np.sin(u) * ci
+    z = np.sin(u) * si * np.ones_like(raan)
+    return np.stack([x, y, z], axis=-1)
+
+
+def grid_directions(lat_deg, lon_deg):
+    """Unit vectors of ground points on a lat x lon grid.
+
+    Inputs: latitudes and longitudes [deg], 1-D arrays
+    Outputs: unit vectors shape (n_lat * n_lon, 3), and latitude of each point [deg]
+    """
+    lat, lon = np.meshgrid(np.radians(lat_deg), np.radians(lon_deg), indexing="ij")
+    vectors = np.stack([np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)],
+                       axis=-1).reshape(-1, 3)
+    return vectors, np.degrees(lat).ravel()
+
+
+def visibility(t_s, raan0, u0, a_m, inc_rad, lambda_rad, points, chunk=500):
+    """Access of each ground point by at least one satellite at each time.
+
+    Inputs:
+        t_s, raan0, u0, a_m, inc_rad : as satellite_directions
+        lambda_rad : Earth central angle of the footprint [rad]
+        points     : ground unit vectors, shape (n_p, 3)
+        chunk      : time steps per block (memory control)
+    Output:
+        boolean array, shape (n_t, n_p)
+    """
+    cos_lambda = np.cos(lambda_rad)
+    vis = np.zeros((len(t_s), len(points)), dtype=bool)
+    for start in range(0, len(t_s), chunk):
+        sat = satellite_directions(t_s[start:start + chunk], raan0, u0, a_m, inc_rad)
+        cos_angle = sat @ points.T                          # (n_c, n_sat, n_p)
+        vis[start:start + chunk] = np.any(cos_angle >= cos_lambda, axis=1)
+    return vis
+
+
+# ---------------------------------------------------------------------------
+# Revisit
+# ---------------------------------------------------------------------------
+
+def access_starts_and_gaps(vis_column, dt_s):
+    """Access start times and complete gaps of one ground point.
+
+    A gap goes from the first step without access to the next step with access.
+    Gaps before the first access and after the last one are incomplete and ignored.
+    An access already in progress at t = 0 is truncated: its true start is
+    unknown, so it is not reported as a start (its end still opens a gap).
+    Inputs:
+        vis_column : boolean access series, shape (n_t,)
+        dt_s       : time step [s]
+    Outputs:
+        starts_s : start times of the accesses [s]
+        gaps_s   : durations of the complete gaps [s]
+    """
+    v = vis_column.astype(np.int8)
+    d = np.diff(v)
+    starts = np.nonzero(d == 1)[0] + 1   # first step of an access
+    ends = np.nonzero(d == -1)[0] + 1    # first step after an access
+    # complete gap: an end followed by a later start
+    gaps = [starts[starts > e][0] - e for e in ends if np.any(starts > e)]
+    return starts * dt_s, np.array(gaps, dtype=float) * dt_s
+
+
+def revisit_by_latitude(vis, point_lat_deg, dt_s):
+    """Max and mean revisit for each latitude of the grid.
+
+    max  = largest complete gap over all longitudes (inf if a point has < 2 accesses)
+    mean = total gap time / number of gaps, pooled over the longitudes
+    Inputs:
+        vis           : boolean access array, shape (n_t, n_p)
+        point_lat_deg : latitude of each point [deg], shape (n_p,)
+        dt_s          : time step [s]
+    Outputs:
+        lats [deg], max_revisit_s, mean_revisit_s, each shape (n_lat,)
+    """
+    lats = np.unique(point_lat_deg)
+    max_s = np.zeros(len(lats))
+    mean_s = np.zeros(len(lats))
+    for i, lat in enumerate(lats):
+        all_gaps, worst = [], 0.0
+        for p in np.nonzero(point_lat_deg == lat)[0]:
+            starts, gaps = access_starts_and_gaps(vis[:, p], dt_s)
+            if len(starts) < 2:
+                worst = np.inf
+            elif len(gaps) > 0:
+                worst = max(worst, gaps.max())
+            all_gaps.append(gaps)
+        pooled = np.concatenate(all_gaps)
+        max_s[i] = worst
+        mean_s[i] = pooled.mean() if len(pooled) > 0 else np.inf
+    return lats, max_s, mean_s
+
+
+def constellation_revisit(raan0, u0, lat_deg, eta_rad, step_s, duration_s,
+                          lon_step_deg=params.COV_LON_STEP_DEG):
+    """Max and mean revisit vs latitude for a set of satellites at the reference SSO.
+
+    Inputs:
+        raan0, u0    : initial RAAN and argument of latitude [rad], shape (n_sat,)
+        lat_deg      : latitudes of the grid [deg]
+        eta_rad      : sensor half-angle [rad]
+        step_s       : time step [s]
+        duration_s   : propagation duration [s]
+        lon_step_deg : longitude step [deg]
+    Outputs: lats [deg], max_revisit_s, mean_revisit_s
+    """
+    a_m = R_E + params.ALT_KM * 1e3
+    inc = sso_inclination(a_m)
+    lam, _ = footprint_from_sensor(params.ALT_KM * 1e3, eta_rad)
+    t_s = np.arange(0.0, duration_s + step_s / 2, step_s)
+    lats = np.atleast_1d(lat_deg).astype(float)
+    max_s = np.full(len(lats), np.inf)
+    mean_s = np.full(len(lats), np.inf)
+    if len(np.ravel(raan0)) == 0:
+        return lats, max_s, mean_s
+    # One latitude at a time: the access array of the full grid would not fit in memory
+    for i, lat in enumerate(lats):
+        points, point_lat = grid_directions(np.array([lat]), np.arange(0.0, 360.0, lon_step_deg))
+        vis = visibility(t_s, np.ravel(raan0), np.ravel(u0), a_m, inc, lam, points)
+        _, max_s[i:i + 1], mean_s[i:i + 1] = revisit_by_latitude(vis, point_lat, step_s)
+    return lats, max_s, mean_s
+
+
+# ---------------------------------------------------------------------------
+# Walker search and degraded configurations
+# ---------------------------------------------------------------------------
+
+def walker_search(eta_rad, step_s, duration_s, p_range, s_range, raan_spread_rad,
+                  lat_deg=params.REVISIT_LAT_DEG, max_revisit_s=params.REVISIT_MAX_HOURS * 3600):
+    """Smallest Walker P/S/F meeting the max-revisit requirement at one latitude.
+
+    Explores P in p_range, S in s_range, F in 0..P-1. Picks the smallest total
+    T = P*S; ties are broken by the smallest max revisit (then fewer planes).
+    The configurations are evaluated by increasing T, and the search stops at the
+    first T with a feasible configuration (same result, much faster).
+    Output: (best (P, S, F) or None, list of rows (P, S, F, max_s, mean_s) evaluated)
+    """
+    configs = [(n_planes, sats, phasing)
+               for n_planes in range(p_range[0], p_range[1] + 1)
+               for sats in range(s_range[0], s_range[1] + 1)
+               for phasing in range(n_planes)]
+    rows = []
+    for total in sorted({c[0] * c[1] for c in configs}):
+        group = []
+        for n_planes, sats, phasing in [c for c in configs if c[0] * c[1] == total]:
+            raan0, u0 = walker_elements(n_planes, sats, phasing, raan_spread_rad)
+            _, max_s, mean_s = constellation_revisit(raan0, u0, lat_deg, eta_rad,
+                                                     step_s, duration_s)
+            group.append((n_planes, sats, phasing, max_s[0], mean_s[0]))
+        rows.extend(group)
+        feasible = [r for r in group if r[3] <= max_revisit_s]
+        if feasible:
+            best = min(feasible, key=lambda r: (r[3], r[0]))
+            return best[:3], rows
+    return None, rows
+
+
+def degraded_plane(raan0, u0, plane, n_left, rephase, slots_left=None):
+    """Elements of the constellation with only n_left satellites in one plane.
+
+    R1 (rephase=True)  : the n_left satellites are re-spaced evenly (2 pi / n_left),
+                         keeping the plane phase offset of slot 0 (ASSUMPTION: drift
+                         manoeuvre time and delta-v not modelled).
+    R2 (rephase=False) : the satellites keep their slots; slots_left lists them.
+    Inputs:
+        raan0, u0 : Walker elements, shape (P, S)
+        plane     : index of the degraded plane
+        n_left    : satellites left in that plane
+    Outputs: raan0, u0 as flat arrays of the remaining satellites
+    """
+    sats = raan0.shape[1]
+    raan_list, u_list = [], []
+    for p in range(raan0.shape[0]):
+        if p != plane:
+            raan_list.append(raan0[p])
+            u_list.append(u0[p])
+        elif rephase:
+            raan_list.append(np.full(n_left, raan0[p, 0]))
+            u_list.append(u0[p, 0] + 2.0 * np.pi * np.arange(n_left) / max(n_left, 1))
+        else:
+            raan_list.append(raan0[p, list(slots_left)])
+            u_list.append(u0[p, list(slots_left)])
+    return np.concatenate(raan_list), np.concatenate(u_list)
+
+
+def revisit_tables(n_planes, sats_per_plane, phasing, eta_rad, step_s, duration_s,
+                   raan_spread_rad, lat_deg=params.REVISIT_LAT_DEG):
+    """Lookup tables "n operational in the plane -> revisit" at one latitude.
+
+    T1: one plane with n satellites, the other P-1 planes full. Computed for
+        every plane; the worst plane is kept (planes of a star are not equivalent).
+        R1 = re-spaced evenly; R2 = slots kept, mean and worst over all the
+        C(S, n) sets of remaining slots.
+    T2: every plane with n satellites, re-spaced evenly (R1): pessimistic bound.
+    Output: dict of arrays over n = 0..S (max and mean revisit [s])
+    """
+    raan0, u0 = walker_elements(n_planes, sats_per_plane, phasing, raan_spread_rad)
+
+    def revisit(r0, uu):
+        _, mx, mn = constellation_revisit(r0, uu, lat_deg, eta_rad, step_s, duration_s)
+        return mx[0], mn[0]
+
+    n_values = np.arange(sats_per_plane + 1)
+    keys = ["t1_r1_max", "t1_r1_mean", "t1_r2_mean_max", "t1_r2_worst_max", "t2_r1_max", "t2_r1_mean"]
+    table = {k: np.zeros(len(n_values)) for k in keys}
+    for i, n in enumerate(n_values):
+        r1 = [revisit(*degraded_plane(raan0, u0, p, n, True)) for p in range(n_planes)]
+        table["t1_r1_max"][i] = max(r[0] for r in r1)
+        table["t1_r1_mean"][i] = max(r[1] for r in r1)
+        r2_max = []
+        for p in range(n_planes):
+            for slots in itertools.combinations(range(sats_per_plane), n):
+                r2_max.append(revisit(*degraded_plane(raan0, u0, p, n, False, slots))[0])
+        r2_max = np.array(r2_max)
+        table["t1_r2_mean_max"][i] = r2_max[np.isfinite(r2_max)].mean() if np.all(np.isfinite(r2_max)) else np.inf
+        table["t1_r2_worst_max"][i] = r2_max.max()
+        r_all = raan0[:, :1].repeat(n, axis=1).ravel()
+        u_all = (u0[:, :1] + 2.0 * np.pi * np.arange(n)[None, :] / max(n, 1)).ravel()
+        table["t2_r1_max"][i], table["t2_r1_mean"][i] = revisit(r_all, u_all)
+    table["n"] = n_values
+    return table
+
+
+# ---------------------------------------------------------------------------
+# Cached coverage results (computed once, reused by main.py and the Monte Carlo)
+# ---------------------------------------------------------------------------
+
+def coverage_key():
+    """Parameters that determine the coverage results (to detect a stale cache)."""
+    return np.array([params.ALT_KM, params.ECCENTRICITY, params.RAAN_SPREAD_DEG, params.ETA_MAX_DEG,
+                     *params.ETA_SWEEP_DEG, params.REVISIT_MAX_HOURS, params.REVISIT_LAT_DEG,
+                     *params.WALKER_P_RANGE, *params.WALKER_S_RANGE, params.COV_STEP_S,
+                     params.COV_DURATION_DAYS, *params.COV_LAT_GRID_DEG, params.COV_LON_STEP_DEG,
+                     MU, R_E, OMEGA_E, J2, params.TROPICAL_YEAR_DAYS])
+
+
+def build_coverage_data():
+    """Walker search for each eta of ETA_SWEEP_DEG, tables and latitude profiles at ETA_MAX_DEG.
+
+    Output: dict of numpy arrays (saved as is in the .npz cache)
+    """
+    step_s, duration_s = params.COV_STEP_S, params.COV_DURATION_DAYS * params.SECONDS_PER_DAY
+    spread = np.radians(params.RAAN_SPREAD_DEG)
+    lat_grid = np.arange(params.COV_LAT_GRID_DEG[0], params.COV_LAT_GRID_DEG[1] + 1e-9,
+                         params.COV_LAT_GRID_DEG[2])
+    data = {"key": coverage_key(), "eta_sweep_deg": np.array(params.ETA_SWEEP_DEG),
+            "lat_grid_deg": lat_grid}
+    best = []
+    for eta_deg in params.ETA_SWEEP_DEG:
+        walker, _ = walker_search(np.radians(eta_deg), step_s, duration_s, params.WALKER_P_RANGE,
+                                  params.WALKER_S_RANGE, spread)
+        best.append(walker if walker is not None else (0, 0, 0))
+    data["best_walker"] = np.array(best)  # (P, S, F) per eta, (0, 0, 0) if none
+
+    # Reference eta: tables and latitude profiles of the chosen Walker
+    i_ref = list(params.ETA_SWEEP_DEG).index(params.ETA_MAX_DEG)
+    n_planes, sats, phasing = data["best_walker"][i_ref]
+    eta = np.radians(params.ETA_MAX_DEG)
+    table = revisit_tables(n_planes, sats, phasing, eta, step_s, duration_s, spread)
+    data.update({f"table_{k}": v for k, v in table.items()})
+    raan0, u0 = walker_elements(n_planes, sats, phasing, spread)
+    for eta_deg in params.ETA_SWEEP_DEG:
+        _, mx, mn = constellation_revisit(raan0, u0, lat_grid, np.radians(eta_deg), step_s, duration_s)
+        data[f"profile_max_s_eta{eta_deg:.0f}"] = mx
+        data[f"profile_mean_s_eta{eta_deg:.0f}"] = mn
+    return data
+
+
+def load_or_build_coverage_data(path):
+    """Load the coverage cache if it matches the current parameters, else rebuild it.
+
+    Inputs: path of the .npz file (its folder is created if needed)
+    Output: dict of numpy arrays (see build_coverage_data)
+    """
+    if os.path.exists(path):
+        cached = dict(np.load(path))
+        if cached["key"].shape == coverage_key().shape and np.allclose(cached["key"], coverage_key()):
+            return cached
+    data = build_coverage_data()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    np.savez(path, **data)
+    return data
+
+
+def min_active_from_table(table_max_s, max_revisit_s=params.REVISIT_MAX_HOURS * 3600):
+    """Smallest n operational in the degraded plane that meets the max-revisit requirement.
+
+    Inputs: max revisit for n = 0..S [s]; requirement [s]
+    Output: n [-] (S + 1 if even the full plane does not meet it)
+    """
+    ok = np.nonzero(table_max_s <= max_revisit_s)[0]
+    return int(ok[0]) if len(ok) > 0 else len(table_max_s)

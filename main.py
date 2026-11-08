@@ -13,6 +13,7 @@ Figures:
 - availability_vs_order_time.png  : availability vs ORDER_TO_LAUNCH_DAYS sweep
 - cost_vs_availability.png        : strategy d) fixed cadence vs c) and b+c), launch
                                     rate vs the two alternative requirements
+- revisit_vs_latitude.png         : max and mean revisit vs latitude of the reference Walker
 
 Availabilities are averaged from the end of the nominal deployment
 (last batch + commissioning) to the end of the horizon.
@@ -25,6 +26,7 @@ matplotlib.use("Agg")  # write files only, no window
 import matplotlib.pyplot as plt
 import numpy as np
 
+import coverage
 import params
 from analytic import (reference_launch_rate, slot_availability_pre_order,
                       slot_availability_renewal_reward)
@@ -435,6 +437,7 @@ def plot_cost_vs_availability(d_curves, d_best, rows, ref_rate, path):
         ax.axvline(ref_rate, color="gray", linestyle=":",
                    label=f"reference rate N/E[up] = {ref_rate:.2f}/yr (whole useful life, no gaps)")
         ax.set_xlabel("Satellites launched per year, steady state [1/yr]")
+        ax.set_xlim(0.95, 2.3)  # the comparison is between ~1 and ~2 satellites/yr
         ax.grid(True, alpha=0.3)
         ax.legend(fontsize=7, loc="lower right")
     axes[0].set_ylabel(f"Fraction of runs with availability >= {params.AVAIL_TARGET} [-]")
@@ -445,6 +448,71 @@ def plot_cost_vs_availability(d_curves, d_best, rows, ref_rate, path):
     fig.suptitle(f"Cost vs availability | {params.N_SLOTS} slots, DL = {params.DESIGN_LIFE_YEARS:.0f} yr, "
                  f"order-to-launch = {params.ORDER_TO_LAUNCH_DAYS:.0f} d, commissioning = "
                  f"{params.COMMISSIONING_DAYS:.0f} d", fontsize=10)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# v0.2: coverage of the reference Walker constellation (coverage.py)
+# ---------------------------------------------------------------------------
+
+COVERAGE_CACHE = os.path.join("data", "revisit_table.npz")
+
+
+def hours(x_s):
+    """Seconds -> hours as text, 'inf' when never revisited."""
+    return "   inf" if not np.isfinite(x_s) else f"{x_s / 3600:6.2f}"
+
+
+def coverage_study():
+    """Walker choice, lookup tables and revisit vs latitude (cached in data/)."""
+    data = coverage.load_or_build_coverage_data(COVERAGE_CACHE)
+    a_m = coverage.R_E + params.ALT_KM * 1e3
+    inc = coverage.sso_inclination(a_m)
+    print(f"Reference SSO: h = {params.ALT_KM:.0f} km, i = {np.degrees(inc):.3f} deg, "
+          f"nodal period = {coverage.nodal_period(a_m, inc) / 60:.3f} min")
+    for eta_deg, walker in zip(data["eta_sweep_deg"], data["best_walker"]):
+        lam, _ = coverage.footprint_from_sensor(params.ALT_KM * 1e3, np.radians(eta_deg))
+        print(f"  eta = {eta_deg:4.0f} deg (lambda = {np.degrees(lam):.2f} deg): smallest Walker "
+              f"meeting max revisit <= {params.REVISIT_MAX_HOURS:.0f} h at "
+              f"{params.REVISIT_LAT_DEG:.0f} deg: {walker[0]}/{walker[1]}/{walker[2]} "
+              f"(T = {walker[0] * walker[1]})")
+
+    print(f"Tables at {params.REVISIT_LAT_DEG:.0f} deg N, eta = {params.ETA_MAX_DEG:.0f} deg [hours]")
+    print(" n | T1 R1 max | T1 R1 mean | T1 R2 mean max | T1 R2 worst max | T2 R1 max | T2 R1 mean")
+    for i, n in enumerate(data["table_n"]):
+        print(f"{n:2d} | {hours(data['table_t1_r1_max'][i])}    | {hours(data['table_t1_r1_mean'][i])}     |"
+              f" {hours(data['table_t1_r2_mean_max'][i])}         | {hours(data['table_t1_r2_worst_max'][i])}"
+              f"          | {hours(data['table_t2_r1_max'][i])}    | {hours(data['table_t2_r1_mean'][i])}")
+    n_min = coverage.min_active_from_table(data["table_t1_r1_max"])
+    print(f"MIN_ACTIVE derived from T1-R1 (max revisit <= {params.REVISIT_MAX_HOURS:.0f} h): "
+          f"{n_min} of {data['table_n'][-1]} per plane")
+    plot_revisit_vs_latitude(data, os.path.join(FIG_DIR, "revisit_vs_latitude.png"))
+
+
+def plot_revisit_vs_latitude(data, path):
+    """Max and mean revisit vs latitude of the reference Walker, for each eta of the sweep."""
+    p, s, f = data["best_walker"][list(data["eta_sweep_deg"]).index(params.ETA_MAX_DEG)]
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4.5), sharex=True)
+    for eta_deg in data["eta_sweep_deg"]:
+        ax1.plot(data["lat_grid_deg"], data[f"profile_max_s_eta{eta_deg:.0f}"] / 3600, "o-",
+                 label=f"eta = {eta_deg:.0f} deg")
+        ax2.plot(data["lat_grid_deg"], data[f"profile_mean_s_eta{eta_deg:.0f}"] / 3600, "o-",
+                 label=f"eta = {eta_deg:.0f} deg")
+    ax1.axhline(params.REVISIT_MAX_HOURS, color="r", linestyle="--", label="requirement (max)")
+    ax1.axvline(params.REVISIT_LAT_DEG, color="gray", linestyle=":")
+    ax2.axvline(params.REVISIT_LAT_DEG, color="gray", linestyle=":")
+    ax1.set_title("(a) Max revisit")
+    ax2.set_title("(b) Mean revisit")
+    for ax in (ax1, ax2):
+        ax.set_xlabel("Latitude [deg]")
+        ax.set_ylabel("Revisit [h]")
+        ax.set_yscale("log")
+        ax.grid(True, which="both", alpha=0.3)
+        ax.legend(fontsize=8)
+    fig.suptitle(f"Walker {p}/{s}/{f} (star, RAAN spread {params.RAAN_SPREAD_DEG:.0f} deg), "
+                 f"SSO {params.ALT_KM:.0f} km, geometric coverage (no illumination)", fontsize=10)
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)
@@ -468,6 +536,9 @@ def main():
 
     print("v0.2: fixed cadence d), search of the minimum cadence, cost comparison")
     cost_study()
+
+    print("v0.2: coverage of the reference Walker constellation")
+    coverage_study()
     print(f"Figures saved in {FIG_DIR}/")
 
 

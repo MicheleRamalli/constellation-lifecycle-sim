@@ -84,6 +84,45 @@ AVAIL_CONFIDENCE = 0.95  # ASSUMPTION: illustrative mission requirement (fractio
 CADENCE_GRID_DAYS_PER_SAT = (90, 365, 15)  # sweep of T/k [days]: start, stop, step (rate ~1-4 sats/yr)
 SEEDS_CHECK = (43, 44)                     # extra seeds to check the sensitivity of T*
 
+# --- Earth constants (coverage.py) ---
+MU_EARTH = 3.986004418e14   # gravitational parameter [m^3/s^2], WGS84 (to be checked on the reference)
+R_EARTH = 6378137.0         # equatorial radius [m], WGS84 (to be checked on the reference)
+OMEGA_EARTH = 7.292115e-5   # Earth rotation rate [rad/s], WGS84 (to be checked on the reference)
+J2_EARTH = 1.08263e-3       # second zonal harmonic [-], Vallado, Fundamentals of Astrodynamics
+                            # and Applications, 4th ed. 2013 (to be checked on the reference)
+TROPICAL_YEAR_DAYS = 365.2422  # tropical year [days], sets the sun-synchronous RAAN rate
+                               # (to be checked on the reference)
+
+# --- Reference Walker constellation (coverage.py) ---
+# Circular sun-synchronous orbit, inclination from the J2 condition (coverage.sso_inclination).
+# Source for the altitude: OHB Italia, "OHB Italia takes part to the IRIDE satellite
+# constellation to protect the Earth" (Eaglet II nominal altitude around 500 km),
+# https://www.ohb-italia.it/?p=8404 ; consistent with ESA 31/03/2026 (467-625 km).
+ALT_KM = 500.0
+ECCENTRICITY = 0.0       # ASSUMPTION: circular orbits
+RAAN_SPREAD_DEG = 180.0  # ASSUMPTION: Walker star (planes over 180 deg of RAAN). In SSO it puts
+                         # the descending passes on the day side; a 360 deg delta would put half
+                         # of the planes on the night side, meaningless for an optical sensor.
+# ASSUMPTION: solar illumination not modelled (geometric coverage only); future development.
+# ASSUMPTION: spherical Earth for the coverage geometry.
+ETA_MAX_DEG = 30.0              # ASSUMPTION: sensor half-angle (max off-nadir); no source for Eaglet II
+ETA_SWEEP_DEG = (15.0, 30.0, 45.0)  # sensitivity sweep of ETA_MAX_DEG [deg]
+
+# --- Revisit requirement and Walker search (coverage.py) ---
+REVISIT_MAX_HOURS = 12.0   # ASSUMPTION: illustrative mission requirement (max revisit)
+REVISIT_LAT_DEG = 45.0     # ASSUMPTION: illustrative mission requirement (latitude, ~Italy)
+WALKER_P_RANGE = (1, 6)    # planes explored in the Walker search (numerical setting)
+WALKER_S_RANGE = (2, 8)    # satellites per plane explored (numerical setting)
+
+# --- Coverage numerics (convergence study on Walker 3/3/1 and 3/4/1, eta = 30 deg, 45 deg N) ---
+# Max revisit identical (to 1e-4 h) for step 5-10 s, duration 30-90 days, longitude
+# step 0.5-2 deg; mean revisit within 0.1 %. A 30 s step misses the short accesses at
+# the footprint edge (lambda = 2.6 deg) and overestimates the max revisit (10.65 h vs 8.98 h).
+COV_STEP_S = 10.0          # propagation time step [s]
+COV_DURATION_DAYS = 30.0   # propagation duration [days]
+COV_LAT_GRID_DEG = (0.0, 80.0, 5.0)  # latitude grid: start, stop, step [deg]
+COV_LON_STEP_DEG = 2.0     # longitude grid step [deg]
+
 # --- Simulation ---
 SIM_DURATION_YEARS = 15.0  # ASSUMPTION: reference mission horizon, to be reviewed
 DT_DAYS = 1.0              # fixed time step (project rule, CLAUDE.md)
