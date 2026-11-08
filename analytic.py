@@ -51,6 +51,35 @@ def slot_availability_renewal_reward(reliability, design_life_s, order_to_launch
     return (e_up_s + delay_s) / (order_to_launch_s + e_life_s + delay_s)
 
 
+def slot_availability_pre_order(reliability, design_life_s, order_to_launch_s,
+                                commissioning_s, delay_s=0.0):
+    """Long-run fraction of time a slot is operational with early ordering (strategy c).
+
+    Each satellite orders its successor at age a = DL - order - commissioning.
+    A cycle goes from one launch to the next:
+        T < a  (lost before the planned order): cycle = T + order (+ detection delay)
+        T >= a (planned successor)            : cycle = DL - commissioning
+    E[cycle] = E[T 1{T<a}] + order F(a) + (DL - comm) R(a)
+             = integral_0^a R dt - a R(a) + order (1 - R(a)) + (DL - comm) R(a)
+             = order + integral_0^a R(t) dt          (since DL - comm - a = order)
+    Each satellite is usable from launch + commissioning to min(T, DL), and the
+    successor starts exactly at DL, so E[up] = integral_comm^DL R(t) dt as in a).
+    A = E[up] / E[cycle]. Without failures (R = 1): A = (DL - comm) / (DL - comm) = 1.
+    delay_s bounds the grid effect as in slot_availability_renewal_reward.
+
+    Inputs/Output: as slot_availability_renewal_reward.
+    """
+    def R_of_years(t_years):
+        return reliability_analytic(t_years * YEAR_S, **reliability)
+
+    pre_order_age_s = design_life_s - order_to_launch_s - commissioning_s
+    e_cycle_s = order_to_launch_s + YEAR_S * quad(R_of_years, 0.0, pre_order_age_s / YEAR_S,
+                                                  limit=200)[0]
+    e_up_s = YEAR_S * quad(R_of_years, commissioning_s / YEAR_S, design_life_s / YEAR_S,
+                           limit=200)[0]
+    return (e_up_s + delay_s) / (e_cycle_s + delay_s)
+
+
 def birth_death_stationary(n_units, fail_rate, repair_rate):
     """Stationary distribution of the number of units down in a finite pool.
 

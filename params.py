@@ -25,6 +25,22 @@ DESIGN_LIFE_YEARS = 5.0  # ASSUMPTION: reference value, to be reviewed (no sourc
 N_SLOTS = 6  # ASSUMPTION: provisional, will come from the Walker constellation design
 MIN_ACTIVE = N_SLOTS  # ASSUMPTION: provisional, full plane required (coverage requirement not yet defined)
 
+# --- Initial deployment in batches ---
+# ASSUMPTION inspired by IRIDE Eaglet II: 24 satellites deployed in 3 batches of 8,
+# first batch launched on 28 November 2025, second batch reported in orbit in
+# March 2026, constellation completed in autumn 2026 (real intervals ~4 and ~6 months).
+# The exact dates of the 2nd and 3rd launches are not given in these releases.
+# Sources:
+# - ASI, "IRIDE continues its development: eight more Eaglet II satellites in orbit",
+#   30/03/2026, https://www.asi.it/en/2026/03/iride-continues-its-development-eight-more-eaglet-ii-satellites-in-orbit/
+# - ESA, "Eight more satellites added to IRIDE space programme", 31/03/2026,
+#   https://www.esa.int/Applications/Observing_the_Earth/IRIDE/Eight_more_satellites_added_to_IRIDE_space_programme
+# - ESA, "Italy's IRIDE completes Eaglet II constellation", 02/10/2026,
+#   https://www.esa.int/Applications/Observing_the_Earth/IRIDE/Italy_s_IRIDE_completes_Eaglet_II_constellation
+# The N_SLOTS + N_SPARES units are split as evenly as possible, larger batches first.
+DEPLOY_BATCHES = 3           # ASSUMPTION: as Eaglet II (3 batches)
+DEPLOY_INTERVAL_DAYS = 180.0 # ASSUMPTION: constant interval, rounded from the Eaglet II ~4 and ~6 months
+
 # --- Replacement strategy: launch on failure ---
 ORDER_TO_LAUNCH_DAYS = 365.0  # ASSUMPTION: provisional reference value, time from replacement order to launch (no source yet)
 COMMISSIONING_DAYS = 30.0     # ASSUMPTION: provisional reference value, time from launch to operational (no source yet)
@@ -45,6 +61,11 @@ REORDER_LEVEL = N_SPARES   # ASSUMPTION: provisional, one reorder per lost satel
 #    propellant); a spare reaching its design life unused is retired.
 # H3 ASSUMPTION: the oldest available spare takes over first (FIFO).
 # H4 ASSUMPTION: takeover is instantaneous (phasing drift within the plane neglected).
+
+# --- Replacement strategy c): early ordering of the retirement replacement ---
+# Every live satellite (also dormant spares) orders its successor at age
+# DESIGN_LIFE - ORDER_TO_LAUNCH - COMMISSIONING, so the successor enters service
+# when it retires. No new parameter: it uses the values above.
 
 # --- Simulation ---
 SIM_DURATION_YEARS = 15.0  # ASSUMPTION: reference mission horizon, to be reviewed

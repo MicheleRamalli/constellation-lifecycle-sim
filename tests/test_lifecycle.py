@@ -10,7 +10,7 @@ import numpy as np
 
 import params
 from analytic import slot_availability_renewal_reward
-from lifecycle import simulate_launch_on_failure
+from lifecycle import deployment_launch_times, simulate_launch_on_failure
 from reliability import reliability_analytic
 
 DAY_S = params.SECONDS_PER_DAY
@@ -27,10 +27,15 @@ WEIBULL = {"model": "weibull", "beta": params.WEIBULL_BETA,
 EXPONENTIAL_SHORT = {"model": "exponential", "mttf_s": 1.0 * YEAR_S}
 
 
-def run(n_slots, n_runs, duration_s, order_s, comm_s, design_life_s, reliability, seed=1):
-    """Shortcut to the simulator with launch success 1 and one satellite per launch."""
+def run(n_slots, n_runs, duration_s, order_s, comm_s, design_life_s, reliability, seed=1,
+        initial_launch_s=0.0):
+    """Shortcut to the simulator with launch success 1 and one satellite per launch.
+
+    By default every slot is launched at t = 0.
+    """
     return simulate_launch_on_failure(
         n_slots=n_slots, n_runs=n_runs, seed=seed, sim_duration_s=duration_s, dt_s=DT_S,
+        initial_launch_s=np.broadcast_to(initial_launch_s, (n_slots,)),
         order_to_launch_s=order_s, commissioning_s=comm_s, design_life_s=design_life_s,
         launch_success_prob=1.0, sats_per_launch=1, reliability=reliability)
 
@@ -132,3 +137,33 @@ def test_failures_poisson_with_zero_lead_time():
     assert n_lo - tol < n_mc < n_hi + tol, (
         f"MC {n_mc} vs [{n_lo:.0f}, {n_hi:.0f}], 4 sigma = {tol:.0f}")
     assert out["n_retirements"].sum() == 0
+
+
+def test_deployment_launch_times():
+    """7 units in 3 batches -> 3, 2, 2, larger batches first."""
+    t_s = deployment_launch_times(7, 3, 180.0 * DAY_S)
+    np.testing.assert_array_equal(t_s / DAY_S, [0, 0, 0, 180, 180, 360, 360])
+
+
+def test_active_fraction_with_deployment_in_batches():
+    """Before the first replacement, E[n_active(t)] = sum_b n_b R(t - t_b).
+
+    Only batches with t - t_b >= COMMISSIONING count. No replacement can be
+    launched before ORDER_TO_LAUNCH (the first loss is at t >= 0). Each satellite
+    is an independent Bernoulli, so var = sum_b n_b R_b (1 - R_b) per run.
+    """
+    n_slots, n_runs, n_batches = 150, 2000, 3   # 3 batches of 50
+    interval_s = params.DEPLOY_INTERVAL_DAYS * DAY_S
+    t_launch_s = deployment_launch_times(n_slots, n_batches, interval_s)
+    out = run(n_slots, n_runs, ORDER_S - DT_S, ORDER_S, COMM_S, DESIGN_LIFE_S, WEIBULL,
+              initial_launch_s=t_launch_s)
+
+    for t_days in [100, 250, 364]:
+        k = int(round(t_days * DAY_S / DT_S))
+        age_s = out["t_s"][k] - t_launch_s
+        r = np.where(age_s >= COMM_S, reliability_analytic(np.maximum(age_s, 0.0), **WEIBULL), 0.0)
+        expected = n_runs * np.sum(r)
+        sigma = np.sqrt(n_runs * np.sum(r * (1.0 - r)))
+        n_mc = out["n_active"][:, k].sum()
+        assert abs(n_mc - expected) < N_SIGMA * sigma, (
+            f"t = {t_days} d: MC {n_mc} vs {expected:.1f}, 4 sigma = {N_SIGMA * sigma:.1f}")
