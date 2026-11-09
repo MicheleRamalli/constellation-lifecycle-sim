@@ -331,8 +331,13 @@ def aggregate_revisit(starts_per_point, gaps_per_point):
 
 def constellation_revisit(raan0, u0, lat_deg, eta_rad, step_s, duration_s,
                           lon_step_deg=params.COV_LON_STEP_DEG,
-                          min_access_s=params.MIN_ACCESS_S):
-    """Max and mean revisit vs latitude for a set of satellites at the reference SSO.
+                          min_access_s=params.MIN_ACCESS_S, a_m=None, inc_rad=None):
+    """Max and mean revisit vs latitude for a set of satellites.
+
+    By default all satellites are on the reference SSO (ALT_KM, J2 sun-synchronous
+    inclination). a_m and inc_rad can be given per satellite (real constellation):
+    each satellite then has its own J2 rates and its own footprint (lambda depends
+    on the altitude).
 
     Useful access = a continuous access of ONE satellite lasting at least
     min_access_s (the sensor of one satellite must point and acquire). The
@@ -347,11 +352,10 @@ def constellation_revisit(raan0, u0, lat_deg, eta_rad, step_s, duration_s,
         duration_s   : propagation duration [s]
         lon_step_deg : longitude step [deg]
         min_access_s : minimum useful access duration [s]
+        a_m, inc_rad : semi-major axis [m] and inclination [rad], scalars or shape (n_sat,);
+                       default: reference SSO
     Outputs: lats [deg], max_revisit_s, mean_revisit_s
     """
-    a_m = R_E + params.ALT_KM * 1e3
-    inc = sso_inclination(a_m)
-    lam, _ = footprint_from_sensor(params.ALT_KM * 1e3, eta_rad)
     t_s = np.arange(0.0, duration_s + step_s / 2, step_s)
     lats = np.atleast_1d(lat_deg).astype(float)
     max_s = np.full(len(lats), np.inf)
@@ -359,6 +363,13 @@ def constellation_revisit(raan0, u0, lat_deg, eta_rad, step_s, duration_s,
     raan0, u0 = np.ravel(raan0), np.ravel(u0)
     if len(raan0) == 0:
         return lats, max_s, mean_s
+    if a_m is None:
+        a_m = R_E + params.ALT_KM * 1e3
+    if inc_rad is None:
+        inc_rad = sso_inclination(a_m)
+    a_sat = np.broadcast_to(a_m, raan0.shape)
+    inc_sat = np.broadcast_to(inc_rad, raan0.shape)
+    lam_sat = [footprint_from_sensor(a - R_E, eta_rad)[0] for a in a_sat]
     lons = np.arange(0.0, 360.0, lon_step_deg)
     block = max(1, int(2e7 // len(t_s)))  # longitudes per block (memory control)
     for i, lat in enumerate(lats):
@@ -367,7 +378,8 @@ def constellation_revisit(raan0, u0, lat_deg, eta_rad, step_s, duration_s,
             points, _ = grid_directions(np.array([lat]), lons[b0:b0 + block])
             intervals = [[] for _ in range(len(points))]
             for j in range(len(raan0)):   # one satellite at a time
-                margin = access_margin(t_s, raan0[j:j + 1], u0[j:j + 1], a_m, inc, lam, points)
+                margin = access_margin(t_s, raan0[j:j + 1], u0[j:j + 1], a_sat[j], inc_sat[j],
+                                       lam_sat[j], points)
                 for p in range(len(points)):
                     intervals[p].append(access_intervals(margin[:, p], step_s, min_access_s))
             for p in range(len(points)):
@@ -382,7 +394,7 @@ def constellation_revisit(raan0, u0, lat_deg, eta_rad, step_s, duration_s,
 
 
 # ---------------------------------------------------------------------------
-# Walker search and degraded configurations
+# Walker search and lookup table
 # ---------------------------------------------------------------------------
 
 def walker_search(eta_rad, step_s, duration_s, p_range, s_range, raan_spread_rad,
@@ -416,34 +428,6 @@ def walker_search(eta_rad, step_s, duration_s, p_range, s_range, raan_spread_rad
     return None, rows
 
 
-def degraded_plane(raan0, u0, plane, n_left, rephase, slots_left=None):
-    """Elements of the constellation with only n_left satellites in one plane.
-
-    R1 (rephase=True)  : the n_left satellites are re-spaced evenly (2 pi / n_left),
-                         keeping the plane phase offset of slot 0 (ASSUMPTION: drift
-                         manoeuvre time and delta-v not modelled).
-    R2 (rephase=False) : the satellites keep their slots; slots_left lists them.
-    Inputs:
-        raan0, u0 : Walker elements, shape (P, S)
-        plane     : index of the degraded plane
-        n_left    : satellites left in that plane
-    Outputs: raan0, u0 as flat arrays of the remaining satellites
-    """
-    sats = raan0.shape[1]
-    raan_list, u_list = [], []
-    for p in range(raan0.shape[0]):
-        if p != plane:
-            raan_list.append(raan0[p])
-            u_list.append(u0[p])
-        elif rephase:
-            raan_list.append(np.full(n_left, raan0[p, 0]))
-            u_list.append(u0[p, 0] + 2.0 * np.pi * np.arange(n_left) / max(n_left, 1))
-        else:
-            raan_list.append(raan0[p, list(slots_left)])
-            u_list.append(u0[p, list(slots_left)])
-    return np.concatenate(raan_list), np.concatenate(u_list)
-
-
 def rephased_constellation(raan0, u0, n_per_plane):
     """Elements with n_per_plane[p] satellites in plane p, re-spaced evenly (R1).
 
@@ -462,58 +446,42 @@ def rephased_constellation(raan0, u0, n_per_plane):
 
 def revisit_table_planes(n_planes, sats_per_plane, phasing, eta_rad, step_s, duration_s,
                          raan_spread_rad, lat_deg=params.REVISIT_LAT_DEG):
-    """Full lookup table revisit(n_1, ..., n_P) at one latitude, R1 rephasing.
+    """Full lookup table revisit(n_1, ..., n_P) of the reference Walker, R1 rephasing.
 
     One entry for every combination of operational satellites per plane,
     n_p = 0..S: (S + 1)^P configurations (25 for 2/4).
     Outputs: max_s, mean_s [s], arrays of shape (S + 1,) * P (inf if never revisited)
     """
     raan0, u0 = walker_elements(n_planes, sats_per_plane, phasing, raan_spread_rad)
+    a_m = R_E + params.ALT_KM * 1e3
+    return revisit_table_from_planes(raan0[:, 0], u0[:, 0], np.full(n_planes, a_m),
+                                     np.full(n_planes, sso_inclination(a_m)), sats_per_plane,
+                                     eta_rad, step_s, duration_s, lat_deg)
+
+
+def revisit_table_from_planes(plane_raan, plane_u0, plane_a, plane_inc, sats_per_plane,
+                              eta_rad, step_s, duration_s, lat_deg=params.REVISIT_LAT_DEG):
+    """Lookup table revisit(n_1, ..., n_P) for planes given by their mean elements, R1 rephasing.
+
+    Plane p has RAAN plane_raan[p], semi-major axis plane_a[p], inclination
+    plane_inc[p]; its n_p satellites are spaced evenly in u starting at plane_u0[p]
+    (R1, instantaneous rephasing ASSUMPTION).
+    Inputs: per-plane arrays [rad], [m], shape (P,); S [-]; as constellation_revisit
+    Outputs: max_s, mean_s [s], arrays of shape (S + 1,) * P
+    """
+    n_planes = len(plane_raan)
     shape = (sats_per_plane + 1,) * n_planes
     max_s, mean_s = np.full(shape, np.inf), np.full(shape, np.inf)
+    raan0 = np.repeat(np.asarray(plane_raan)[:, None], sats_per_plane, axis=1)
+    u0 = np.repeat(np.asarray(plane_u0)[:, None], sats_per_plane, axis=1)
     for n_per_plane in itertools.product(range(sats_per_plane + 1), repeat=n_planes):
         r0, uu = rephased_constellation(raan0, u0, n_per_plane)
-        _, mx, mn = constellation_revisit(r0, uu, lat_deg, eta_rad, step_s, duration_s)
+        a_sat = np.repeat(plane_a, n_per_plane)
+        inc_sat = np.repeat(plane_inc, n_per_plane)
+        _, mx, mn = constellation_revisit(r0, uu, lat_deg, eta_rad, step_s, duration_s,
+                                          a_m=a_sat, inc_rad=inc_sat)
         max_s[n_per_plane], mean_s[n_per_plane] = mx[0], mn[0]
     return max_s, mean_s
-
-
-def revisit_tables(n_planes, sats_per_plane, phasing, eta_rad, step_s, duration_s,
-                   raan_spread_rad, lat_deg=params.REVISIT_LAT_DEG):
-    """Lookup tables "n operational in the plane -> revisit" at one latitude.
-
-    T1: one plane with n satellites, the other P-1 planes full. Computed for
-        every plane; the worst plane is kept (planes of a star are not equivalent).
-        R1 = re-spaced evenly; R2 = slots kept, mean and worst over all the
-        C(S, n) sets of remaining slots.
-    T2: every plane with n satellites, re-spaced evenly (R1): pessimistic bound.
-    Output: dict of arrays over n = 0..S (max and mean revisit [s])
-    """
-    raan0, u0 = walker_elements(n_planes, sats_per_plane, phasing, raan_spread_rad)
-
-    def revisit(r0, uu):
-        _, mx, mn = constellation_revisit(r0, uu, lat_deg, eta_rad, step_s, duration_s)
-        return mx[0], mn[0]
-
-    n_values = np.arange(sats_per_plane + 1)
-    keys = ["t1_r1_max", "t1_r1_mean", "t1_r2_mean_max", "t1_r2_worst_max", "t2_r1_max", "t2_r1_mean"]
-    table = {k: np.zeros(len(n_values)) for k in keys}
-    for i, n in enumerate(n_values):
-        r1 = [revisit(*degraded_plane(raan0, u0, p, n, True)) for p in range(n_planes)]
-        table["t1_r1_max"][i] = max(r[0] for r in r1)
-        table["t1_r1_mean"][i] = max(r[1] for r in r1)
-        r2_max = []
-        for p in range(n_planes):
-            for slots in itertools.combinations(range(sats_per_plane), n):
-                r2_max.append(revisit(*degraded_plane(raan0, u0, p, n, False, slots))[0])
-        r2_max = np.array(r2_max)
-        table["t1_r2_mean_max"][i] = r2_max[np.isfinite(r2_max)].mean() if np.all(np.isfinite(r2_max)) else np.inf
-        table["t1_r2_worst_max"][i] = r2_max.max()
-        r_all = raan0[:, :1].repeat(n, axis=1).ravel()
-        u_all = (u0[:, :1] + 2.0 * np.pi * np.arange(n)[None, :] / max(n, 1)).ravel()
-        table["t2_r1_max"][i], table["t2_r1_mean"][i] = revisit(r_all, u_all)
-    table["n"] = n_values
-    return table
 
 
 # ---------------------------------------------------------------------------
@@ -548,12 +516,10 @@ def build_coverage_data():
         best.append(walker if walker is not None else (0, 0, 0))
     data["best_walker"] = np.array(best)  # (P, S, F) per eta, (0, 0, 0) if none
 
-    # Reference eta: tables and latitude profiles of the chosen Walker
+    # Reference eta: lookup table revisit(n_1, ..., n_P) and latitude profiles of the chosen Walker
     i_ref = list(params.ETA_SWEEP_DEG).index(params.ETA_MAX_DEG)
     n_planes, sats, phasing = data["best_walker"][i_ref]
     eta = np.radians(params.ETA_MAX_DEG)
-    table = revisit_tables(n_planes, sats, phasing, eta, step_s, duration_s, spread)
-    data.update({f"table_{k}": v for k, v in table.items()})
     raan0, u0 = walker_elements(n_planes, sats, phasing, spread)
     data["table_planes_max_s"], data["table_planes_mean_s"] = revisit_table_planes(
         n_planes, sats, phasing, eta, step_s, duration_s, spread)
@@ -595,13 +561,3 @@ def load_or_build_coverage_data(path):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     np.savez(path, **data)
     return data
-
-
-def min_active_from_table(table_max_s, max_revisit_s=params.REVISIT_MAX_HOURS * 3600):
-    """Smallest n operational in the degraded plane that meets the max-revisit requirement.
-
-    Inputs: max revisit for n = 0..S [s]; requirement [s]
-    Output: n [-] (S + 1 if even the full plane does not meet it)
-    """
-    ok = np.nonzero(table_max_s <= max_revisit_s)[0]
-    return int(ok[0]) if len(ok) > 0 else len(table_max_s)

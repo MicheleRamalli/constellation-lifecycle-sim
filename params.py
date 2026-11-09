@@ -143,6 +143,27 @@ COV_DURATION_DAYS = 30.0   # propagation duration [days]
 COV_LAT_GRID_DEG = (0.0, 80.0, 5.0)  # latitude grid: start, stop, step [deg]
 COV_LON_STEP_DEG = 2.0     # longitude grid step [deg]
 
+# --- Scenario 2: IRIDE Eaglet II from public TLEs (tle.py, fetch_tle.py, planes.py) ---
+# Objects: CelesTrak SATCAT, names "IRIDE-MS1-EAGLET 2-n". 1st launch 2025-276 (EAGLET 2-1..2-8),
+# 2nd launch 2026-067 (EAGLET 2-9..2-16). The 3rd launch (2026-227, Transporter-18, 01/10/2026)
+# has only 5 of its 8 Eaglet II identifiable by name in the SATCAT (2-17, 2-20, 2-22, 2-23, 2-24);
+# 2-18, 2-19, 2-21 are not identifiable (provisional names), so the scenario uses the 16
+# satellites of the first two launches (decision: do not guess). Their 6-digit NORAD numbers
+# would also not fit the classic TLE format.
+IRIDE_TLE_URL = "https://celestrak.org/NORAD/elements/gp.php?NAME=IRIDE-MS1-EAGLET&FORMAT=TLE"
+IRIDE_NORAD = (66695, 66696, 66697, 66698, 66699, 66700, 66701, 66702,
+               68447, 68449, 68450, 68451, 68452, 68453, 68461, 68462)
+IRIDE_TLE_RAW_PATTERN = "inputs/tle/celestrak_iride_eaglet2_{date}.tle"  # raw, NOT in git
+IRIDE_ELEMENTS_CSV = "inputs/iride_eaglet2_elements.csv"               # derived, in git
+# Launch dates -> days from the first launch: 0, 122, 307.
+# 28/11/2025: ASI, "IRIDE continues its development: eight more Eaglet II satellites in orbit", 30/03/2026
+# 30/03/2026: OHB Italia, https://www.ohb-italia.it/?p=31139 (03/04/2026); LEOP of the 2nd batch
+#             completed in ~30 h (this is NOT the commissioning time)
+# 01/10/2026: ESA, "Italy's IRIDE completes Eaglet II constellation", 02/10/2026
+IRIDE_LAUNCH_DAYS = (0.0, 122.0, 307.0)
+PLANE_GROUP_THRESHOLD_DEG = 5.0         # ASSUMPTION: max RAAN gap within a plane (see planes.py)
+PLANE_GROUP_SWEEP_DEG = (2.0, 5.0, 10.0)  # sensitivity of the plane grouping
+
 # --- Simulation ---
 SIM_DURATION_YEARS = 15.0  # ASSUMPTION: reference mission horizon, to be reviewed
 DT_DAYS = 1.0              # fixed time step (project rule, CLAUDE.md)

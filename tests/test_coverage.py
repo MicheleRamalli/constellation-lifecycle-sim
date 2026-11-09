@@ -198,16 +198,6 @@ def test_polar_revisit_at_pole():
     assert abs(intervals.mean() - expected) <= 2 * dt / len(intervals)
 
 
-def test_degraded_plane_counts():
-    """R1 keeps n re-spaced satellites; R2 keeps the given slots; other planes untouched."""
-    raan0, u0 = cv.walker_elements(3, 4, 1, np.pi)
-    r1_raan, r1_u = cv.degraded_plane(raan0, u0, 1, 2, True)
-    assert len(r1_raan) == 4 + 2 + 4
-    np.testing.assert_allclose(np.diff(np.sort(r1_u[4:6])), [np.pi])
-    r2_raan, r2_u = cv.degraded_plane(raan0, u0, 1, 2, False, (0, 3))
-    np.testing.assert_allclose(r2_u[4:6], u0[1, [0, 3]])
-
-
 def test_walker_search_picks_smallest_feasible_total():
     """Loose requirement -> smallest T (1 plane x 2 sats); impossible one -> None."""
     kwargs = dict(eta_rad=np.radians(params.ETA_MAX_DEG), step_s=30.0, duration_s=2 * 86400.0,
@@ -219,13 +209,6 @@ def test_walker_search_picks_smallest_feasible_total():
     best, rows = cv.walker_search(max_revisit_s=1.0, **kwargs)
     assert best is None
     assert len(rows) == 2 + 2 * 2  # P=1: S=2,3; P=2: S=2,3 with F=0,1
-
-
-def test_min_active_from_table():
-    hours = 3600.0
-    assert cv.min_active_from_table(np.array([np.inf, 20, 13, 13, 7]) * hours, 12 * hours) == 4
-    assert cv.min_active_from_table(np.array([np.inf, 20, 11, 9]) * hours, 12 * hours) == 2
-    assert cv.min_active_from_table(np.array([np.inf, 20, 13]) * hours, 12 * hours) == 3
 
 
 def test_quadratic_crossing_on_parabolic_margin():
@@ -267,3 +250,16 @@ def test_integer_time_step_gives_same_result():
     starts_i, gaps_i = cv.access_starts_and_gaps(m, 10)
     np.testing.assert_array_equal(starts_f, starts_i)
     np.testing.assert_array_equal(gaps_f, gaps_i)
+
+
+def test_per_satellite_orbits_equal_scalar_call():
+    """Per-satellite a and i equal to the reference give exactly the default result."""
+    raan0, u0 = cv.walker_elements(2, 2, 1, np.pi)
+    a = cv.R_E + ALT_M
+    kwargs = dict(lat_deg=45.0, eta_rad=np.radians(30), step_s=30.0, duration_s=2 * 86400.0,
+                  min_access_s=0.0)
+    ref = cv.constellation_revisit(raan0, u0, **kwargs)
+    per_sat = cv.constellation_revisit(raan0, u0, a_m=np.full(4, a),
+                                       inc_rad=np.full(4, cv.sso_inclination(a)), **kwargs)
+    np.testing.assert_array_equal(ref[1], per_sat[1])
+    np.testing.assert_array_equal(ref[2], per_sat[2])
