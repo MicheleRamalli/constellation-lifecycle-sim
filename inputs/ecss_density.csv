@@ -1,6 +1,6 @@
-# Source: ECSS-E-ST-10-04C (15 November 2008), Annex G. NRLMSISE-00: Tables G-1 (low: F10.7=F10.7avg=65, Ap=0), G-2 (moderate: 140, Ap=15), G-3 (high long term: 250, Ap=45), total mass density rho column.
-# JB-2006: Table G-4 (low / moderate / high long term). Equatorial, averaged over diurnal and seasonal variations. Units kg/m^3.
-# Transcribed with pdftotext from the PDF (pages 135-139); spot-check against the PDF.
+# Source: ECSS-E-ST-10-04C Rev.1 (15 June 2020), Annex G. NRLMSISE-00: Tables G-1 (low: F10.7=F10.7avg=65, Ap=0), G-2 (moderate: 140, Ap=15), G-3 (high long term: 250, Ap=45), total mass density rho column.
+# JB-2006: Table G-4 (low / moderate / high long term). Equatorial, averaged over diurnal and seasonal variations. Index values: Table 6-3. Units kg/m^3.
+# Transcribed with pdftotext from the PDF (pages 144-148); identical to the 2008 issue (pages 135-139). Spot-check against the PDF.
 alt_km,rho_nrlmsise_low,rho_nrlmsise_moderate,rho_nrlmsise_high,rho_jb2006_low,rho_jb2006_moderate,rho_jb2006_high
 0,1.07E+00,1.16E+00,1.29E+00,,,
 20,8.68E-02,9.37E-02,1.05E-01,,,
