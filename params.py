@@ -164,6 +164,68 @@ IRIDE_LAUNCH_DAYS = (0.0, 122.0, 307.0)
 PLANE_GROUP_THRESHOLD_DEG = 5.0         # ASSUMPTION: max RAAN gap within a plane (see planes.py)
 PLANE_GROUP_SWEEP_DEG = (2.0, 5.0, 10.0)  # sensitivity of the plane grouping
 
+# --- Space debris mitigation requirements (v0.3) ---
+# Source: ESA Space Debris Mitigation Requirements, ESSB-ST-U-007, Issue 1 Rev 0, 30/10/2023,
+# https://technology.esa.int/upload/media/DGHKMZ_6542582e18e33.pdf (requirement ID in each comment).
+# The text read does not cite ISO 27852; for the methods it refers to ESSB-HB-U-002 and
+# ECSS-E-ST-10-04.
+LEO_LIFETIME_LIMIT_YEARS = 5.0  # 5.4.2.3a.1: orbital lifetime in LEO after end of mission < 5 yr
+                                # (start of the count depends on the recurrent manoeuvre
+                                # capability: TO VERIFY on the document)
+CUM_COLLISION_PROB_LIMIT = 1e-3  # 5.4.2.3a.2: cumulative collision probability with objects
+                                 # > 1 cm, from end of life to re-entry (MASTER flux x area x time)
+DISPOSAL_PROB_REF = 0.9          # 5.4.1.1a: probability of successful disposal > 0.9 (includes
+                                 # reliability and impacts); reference value of P_d
+DISPOSAL_PROB_SWEEP = (0.5, 0.6, 0.7, 0.8, 0.9, 1.0)  # sensitivity sweep of P_d
+CASUALTY_RISK_LIMIT = 1e-4       # 5.5b: on-ground casualty risk of a re-entry < 1e-4 (SARA)
+# Large constellations: applicability TO VERIFY (definition of large constellation)
+DISPOSAL_PROB_LARGE_CONST = 0.95        # 5.4.1.1b: probability of successful disposal > 0.95
+CASUALTY_RISK_LIMIT_LARGE_CONST = 1e-6  # 5.5d.1: casualty risk < 1e-6
+APOGEE_LIMIT_LARGE_CONST_KM = 375.0     # 5.4.2.3c: apogee < 375 km (wording TO VERIFY)
+
+# --- Eaglet II satellite (decay.py) ---
+# Mass: ESA, 31/03/2026 (~25 kg), https://www.esa.int/Applications/Observing_the_Earth/IRIDE/
+# Eight_more_satellites_added_to_IRIDE_space_programme (to be checked that this is the 31/03/2026 article)
+EAGLET_MASS_KG = 25.0
+EAGLET_BOX_M = (0.5, 0.4, 0.3)  # ASSUMPTION: box "the size of a microwave oven" (ESA); no published
+                                # dimensions. Mean area of a tumbling convex body = surface / 4
+                                # (Cauchy), solar panels unknown -> sweep below
+EAGLET_AREA_FACTORS = (0.5, 1.0, 2.0)  # sensitivity sweep of the area [-]
+EAGLET_PROPULSION = False  # ASSUMPTION: no public source on a propulsion system (checked ESA, ASI,
+                           # OHB Italia): no disposal manoeuvre, no altitude keeping
+DRAG_COEFFICIENT = 2.2     # ASSUMPTION: common value for a compact satellite in free-molecular
+                           # flow; same value as the DRAMA/OSCAR Sentinel-3B reference run
+
+# --- Atmosphere for the drag decay (decay.py) ---
+# Piecewise exponential density (Vallado method) through the tabulated densities of
+# ECSS-E-ST-10-04C Rev.1 (15 June 2020), Annex G: NRLMSISE-00 Tables G-1 / G-2 / G-3 (low,
+# moderate, high long-term solar and geomagnetic activity, pages 144-146) and JB-2006
+# Table G-4 (pages 147-148); activity indices in Table 6-3 (page 45). Values identical to the
+# 2008 issue. Transcribed in inputs/ecss_density.csv (checked against the PDF: 46 rows, 0
+# differences). Constant activity in time: ASSUMPTION (OSCAR uses a time-varying forecast).
+# Note: Table G-3 at 900 km gives 6.00e-14 kg/m^3, but the sum of its own constituent
+# densities gives 5.23e-14 (all other rows agree within 2.5 %): probably a typo in the
+# standard; it only affects 880-900 km, high activity (not used here: orbits <= 800 km).
+ATM_DENSITY_CSV = "inputs/ecss_density.csv"
+ATM_MODEL = "nrlmsise"            # reference model: NRLMSISE-00, as OSCAR's default atmosphere
+ATM_MODEL_SENSITIVITY = "jb2006"  # second model of the same standard, for sensitivity
+SOLAR_ACTIVITY_LEVELS = ("low", "moderate", "high")
+DECAY_END_ALT_KM = 150.0  # ASSUMPTION: altitude where the orbit is considered re-entered. The
+                          # lifetime changes by < 0.01 yr between 100 and 200 km (decay_study in
+                          # main.py); OSCAR's value is not stated in the DRAMA 4.1.4 user documentation
+DECAY_END_SWEEP_KM = (100.0, 150.0, 200.0)  # sensitivity of the lifetime to the end altitude
+
+# --- Reference case for decay.py: DRAMA 4.1.4 OSCAR, Sentinel-3B tutorial (run by the user) ---
+# Circular orbit, C_D 2.2, NRLMSISE-00, ESA "latest prediction" solar activity, start 2018-04-26;
+# result 14.28 yr INCLUDING a 5 % lifetime margin (OSCAR documentation: recommended by
+# ISO 27852:2024), re-entry 2032-08-08.
+S3B_ALT_KM = 600.27
+S3B_INC_DEG = 98.62
+S3B_AREA_M2 = 16.435
+S3B_MASS_KG = 1130.0
+S3B_LIFETIME_YEARS = 14.28
+S3B_MARGIN = 0.05
+
 # --- Simulation ---
 SIM_DURATION_YEARS = 15.0  # ASSUMPTION: reference mission horizon, to be reviewed
 DT_DAYS = 1.0              # fixed time step (project rule, CLAUDE.md)

@@ -2,7 +2,8 @@
 
 TLE format (fixed columns, 1-based, as in the CelesTrak / NORAD documentation):
   line 1: catalog number 3-7, international designator 10-17, epoch year 19-20,
-          epoch day of year 21-32, checksum 69
+          epoch day of year 21-32, first derivative of the mean motion divided by 2
+          34-43 [rev/day^2], checksum 69
   line 2: inclination 9-16 [deg], RAAN 18-25 [deg], eccentricity 27-33 (leading
           decimal point implied), argument of perigee 35-42 [deg], mean anomaly
           44-51 [deg], mean motion 53-63 [rev/day], checksum 69
@@ -41,7 +42,8 @@ def parse_tle(name, line1, line2):
     """Parse one TLE (name + two lines), checking line numbers, catalog numbers and checksums.
 
     Output: dict with name, norad, intdes, epoch (datetime UTC), inc_deg, raan_deg,
-            ecc, argp_deg, mean_anomaly_deg, n_rev_day
+            ecc, argp_deg, mean_anomaly_deg, n_rev_day, ndot_rev_day2 (first
+            derivative of the mean motion; the TLE field holds ndot/2)
     """
     line1, line2 = line1.rstrip(), line2.rstrip()
     if len(line1) != 69 or len(line2) != 69 or line1[0] != "1" or line2[0] != "2":
@@ -62,6 +64,7 @@ def parse_tle(name, line1, line2):
         "argp_deg": float(line2[34:42]),
         "mean_anomaly_deg": float(line2[43:51]),
         "n_rev_day": float(line2[52:63]),
+        "ndot_rev_day2": 2.0 * float(line1[33:43]),
     }
 
 
@@ -95,7 +98,8 @@ def brouwer_mean_motion(n_kozai_rad_s, ecc, inc_rad):
 
 
 def element_rows(records):
-    """Rows of the derived table: name, norad, intdes, epoch, a [km], e, i, RAAN, u [deg].
+    """Rows of the derived table: name, norad, intdes, epoch, a [km], e, i, RAAN, u [deg],
+    ndot [rev/day^2].
 
     a is the Brouwer semi-major axis; u = argument of perigee + mean anomaly
     (mean argument of latitude, adequate for near-circular orbits).
@@ -110,6 +114,7 @@ def element_rows(records):
             "a_km": f"{a_m / 1e3:.4f}", "ecc": f"{r['ecc']:.7f}",
             "inc_deg": f"{r['inc_deg']:.4f}", "raan_deg": f"{r['raan_deg']:.4f}",
             "u_deg": f"{(r['argp_deg'] + r['mean_anomaly_deg']) % 360.0:.4f}",
+            "n_rev_day": f"{r['n_rev_day']:.8f}", "ndot_rev_day2": f"{r['ndot_rev_day2']:.4e}",
         })
     return rows
 
@@ -128,8 +133,10 @@ def read_elements_csv(path):
     """Read the derived table. Output: dict of numpy arrays (angles in rad, a in m, epoch in s).
 
     Keys: name, norad, intdes, epoch_s (seconds since the earliest epoch of the
-    table), epoch0 (that earliest epoch, datetime), a_m, ecc, inc_rad, raan_rad, u_rad.
+    table), epoch0 (that earliest epoch, datetime), a_m, ecc, inc_rad, raan_rad, u_rad,
+    n_rad_s (TLE mean motion), ndot_rad_s2 (TLE first derivative of the mean motion).
     """
+    rev_day = 2.0 * np.pi / params.SECONDS_PER_DAY  # 1 rev/day in rad/s
     with open(path) as f:
         reader = csv.DictReader(l for l in f if not l.startswith("#"))
         rows = list(reader)
@@ -147,4 +154,7 @@ def read_elements_csv(path):
         "inc_rad": np.radians([float(r["inc_deg"]) for r in rows]),
         "raan_rad": np.radians([float(r["raan_deg"]) for r in rows]),
         "u_rad": np.radians([float(r["u_deg"]) for r in rows]),
+        "n_rad_s": np.array([float(r["n_rev_day"]) for r in rows]) * rev_day,
+        "ndot_rad_s2": np.array([float(r["ndot_rev_day2"]) for r in rows])
+                       * rev_day / params.SECONDS_PER_DAY,
     }

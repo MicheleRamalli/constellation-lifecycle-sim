@@ -27,6 +27,8 @@ def main():
         print(f"Using the file already downloaded today: {raw_path}")
         with open(raw_path) as f:
             text = f.read()
+        # download time = time the raw file was written
+        now = datetime.datetime.fromtimestamp(os.path.getmtime(raw_path), datetime.timezone.utc)
     else:
         request = urllib.request.Request(params.IRIDE_TLE_URL,
                                          headers={"User-Agent": "constellation-lifecycle student project"})
@@ -51,7 +53,8 @@ def main():
     header = [f"Derived from CelesTrak GP data: {params.IRIDE_TLE_URL}",
               f"Downloaded {now.strftime('%Y-%m-%d %H:%M')} UTC (raw TLE file not redistributed)",
               "a = Brouwer semi-major axis (Hoots & Roehrich 1980) [km]; i, RAAN in deg at epoch;",
-              "u = argument of perigee + mean anomaly at epoch [deg]"]
+              "u = argument of perigee + mean anomaly at epoch [deg];",
+              "n = TLE (Kozai) mean motion [rev/day]; ndot = TLE first derivative of n [rev/day^2]"]
     tle.write_elements_csv(params.IRIDE_ELEMENTS_CSV, tle.element_rows(used), header)
     print(f"Wrote {len(used)} rows to {params.IRIDE_ELEMENTS_CSV}")
 

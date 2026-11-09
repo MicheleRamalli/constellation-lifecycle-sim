@@ -22,6 +22,7 @@ def test_published_tle_fields():
     assert r["ecc"] == 0.0006703
     assert r["argp_deg"] == 130.5360 and r["mean_anomaly_deg"] == 325.0288
     assert r["n_rev_day"] == 15.72125391
+    assert r["ndot_rev_day2"] == 2 * -0.00002182   # the TLE field holds ndot / 2
     assert tle.checksum(ISS[1]) == 7 and tle.checksum(ISS[2]) == 7
 
 
@@ -63,6 +64,9 @@ def test_csv_roundtrip(tmp_path):
     assert el["norad"][0] == 25544
     assert np.isclose(np.degrees(el["raan_rad"][0]), 247.4627)
     assert np.isclose(np.degrees(el["u_rad"][0]), (130.5360 + 325.0288) % 360)
+    rev_day = 2 * np.pi / 86400.0
+    assert np.isclose(el["n_rad_s"][0], 15.72125391 * rev_day)
+    assert np.isclose(el["ndot_rad_s2"][0], -2 * 0.00002182 * rev_day / 86400.0)
 
 
 def test_iride_csv_content():

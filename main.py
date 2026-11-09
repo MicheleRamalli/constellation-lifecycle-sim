@@ -25,11 +25,20 @@ Figures:
                                     mission criterion, one panel per revisit requirement
 - iride_scenario.png              : IRIDE Eaglet II from public TLEs: in-plane phases and
                                     revisit vs latitude (real, ideal, reference Walker)
+- decay.png                       : Eaglet II orbital lifetime vs altitude; decay rate from
+                                    the IRIDE TLEs vs the drag model
 
 Second scenario: IRIDE Eaglet II, planes reconstructed from the derived TLE table
 (inputs/iride_eaglet2_elements.csv, written by fetch_tle.py; planes.py).
+
+Usage:
+    python main.py         fast mode (default): the check of T* with the extra seeds
+                           params.SEEDS_CHECK is skipped; every other result is identical
+    python main.py --full  also runs the T* check with the extra seeds (measured on the
+                           development laptop: ~7 min fast, ~11 min full)
 """
 
+import argparse
 import os
 
 import matplotlib
@@ -40,8 +49,10 @@ from matplotlib.ticker import FormatStrFormatter, NullFormatter
 from scipy.integrate import quad
 
 import coverage
+import decay
 import params
 import planes
+import tle
 from analytic import (reference_launch_rate, slot_availability_pre_order,
                       slot_availability_renewal_reward)
 from lifecycle import (constellation_availability, constellation_revisit_series,
@@ -360,8 +371,12 @@ def failure_breakdown(out, req="max"):
     return failing.mean(), counts
 
 
-def cost_study():
-    """Search of T* for d) and comparison with c) and b+c), for both revisit requirements."""
+def cost_study(full):
+    """Search of T* for d) and comparison with c) and b+c), for both revisit requirements.
+
+    full: if True, T* is also searched with the extra seeds params.SEEDS_CHECK
+    (sensitivity check only: nothing else depends on it).
+    """
     ref_rate = params.N_PLANES * reference_launch_rate(
         params.N_SLOTS, RELIABILITY, params.DESIGN_LIFE_YEARS * YEAR_S,
         params.COMMISSIONING_DAYS * DAY_S) * YEAR_S
@@ -381,10 +396,14 @@ def cost_study():
                 continue
             if not result.get("bracketed", True):
                 print(f"  d) k = {k}: every interval of the grid meets it (T* >= {t_star} d)")
-            checks = [cadence_search(k, seed, req, t_ref_days=t_star)["t_star_days"]
-                      for seed in params.SEEDS_CHECK]
+            if full:
+                checks = [cadence_search(k, seed, req, t_ref_days=t_star)["t_star_days"]
+                          for seed in params.SEEDS_CHECK]
+                check_text = f"seeds {params.SEEDS_CHECK}: {checks}"
+            else:
+                check_text = "seed check skipped, run with --full"
             d_best[req][k] = t_star
-            print(f"  d) k = {k}: T* = {t_star} d (seeds {params.SEEDS_CHECK}: {checks}) -> "
+            print(f"  d) k = {k}: T* = {t_star} d ({check_text}) -> "
                   f"{params.N_PLANES * k * 365.25 / t_star:.3f} satellites/yr; "
                   f"non monotone: {result.get('non_monotone')}")
 
@@ -716,7 +735,109 @@ def plot_iride(sc, cov, path):
     plt.close(fig)
 
 
+# ---------------------------------------------------------------------------
+# Orbital decay (v0.3): reference case Sentinel-3B (OSCAR) and Eaglet II
+# ---------------------------------------------------------------------------
+
+def eaglet_ballistic_coefficient():
+    """B of Eaglet II [m^2/kg]: C_D x (box surface / 4) / mass (params.py, ASSUMPTIONs)."""
+    area_m2 = decay.box_mean_area(*params.EAGLET_BOX_M)
+    return decay.ballistic_coefficient(params.DRAG_COEFFICIENT, area_m2, params.EAGLET_MASS_KG)
+
+
+def decay_study():
+    """Lifetime of Sentinel-3B vs OSCAR, lifetime of Eaglet II, TLE decay rate vs model."""
+    models = (params.ATM_MODEL, params.ATM_MODEL_SENSITIVITY)
+    tables = {m: decay.read_density_table(params.ATM_DENSITY_CSV, m) for m in models}
+    end_m = params.DECAY_END_ALT_KM * 1e3
+
+    b_s3b = decay.ballistic_coefficient(params.DRAG_COEFFICIENT, params.S3B_AREA_M2, params.S3B_MASS_KG)
+    oscar_no_margin = params.S3B_LIFETIME_YEARS / (1.0 + params.S3B_MARGIN)
+    print(f"Sentinel-3B, circular {params.S3B_ALT_KM} km, B = {b_s3b:.4f} m^2/kg. OSCAR (latest "
+          f"prediction, time-varying activity): {params.S3B_LIFETIME_YEARS} yr incl. "
+          f"{params.S3B_MARGIN:.0%} margin, {oscar_no_margin:.2f} yr without (if multiplicative)")
+    for model, (alt_m, rho) in tables.items():
+        for level in params.SOLAR_ACTIVITY_LEVELS:
+            t_years = [decay.lifetime(params.S3B_ALT_KM * 1e3, e * 1e3, alt_m, rho[level], b_s3b) / YEAR_S
+                       for e in params.DECAY_END_SWEEP_KM]
+            print(f"  {model:8s} {level:8s} constant activity: lifetime to "
+                  + " / ".join(f"{e:.0f}" for e in params.DECAY_END_SWEEP_KM) + " km = "
+                  + " / ".join(f"{t:.3f}" for t in t_years) + " yr")
+
+    b = eaglet_ballistic_coefficient()
+    print(f"Eaglet II: m = {params.EAGLET_MASS_KG} kg, box {params.EAGLET_BOX_M} m, "
+          f"A = {decay.box_mean_area(*params.EAGLET_BOX_M):.3f} m^2, B = {b:.4f} m^2/kg; "
+          f"lifetime from {params.ALT_KM:.0f} km [yr] for area x {params.EAGLET_AREA_FACTORS} "
+          f"(limit {params.LEO_LIFETIME_LIMIT_YEARS:.0f} yr, ESSB-ST-U-007 5.4.2.3a.1)")
+    for model, (alt_m, rho) in tables.items():
+        for level in params.SOLAR_ACTIVITY_LEVELS:
+            t_years = [decay.lifetime(params.ALT_KM * 1e3, end_m, alt_m, rho[level], b * f) / YEAR_S
+                       for f in params.EAGLET_AREA_FACTORS]
+            print(f"  {model:8s} {level:8s}: " + " / ".join(f"{t:6.2f}" for t in t_years))
+
+    el = tle.read_elements_csv(params.IRIDE_ELEMENTS_CSV)
+    alt_sat_m = el["a_m"] - coverage.R_E
+    observed = decay.sma_rate_from_ndot(el["a_m"], el["n_rad_s"], el["ndot_rad_s2"]) * DAY_S
+    print("IRIDE TLE: da/dt from ndot [m/day] vs model (area x 1):")
+    predicted = {}
+    for model, (alt_m, rho) in tables.items():
+        predicted[model] = {level: decay.decay_rate(el["a_m"], decay.density(alt_sat_m, alt_m, rho[level]), b)
+                            * DAY_S for level in params.SOLAR_ACTIVITY_LEVELS}
+    for j in np.argsort(el["norad"]):
+        print(f"  {el['name'][j]:24s} {el['norad'][j]:6d} alt {alt_sat_m[j] / 1e3:6.1f} km: observed "
+              f"{observed[j]:7.1f}; {params.ATM_MODEL} low/mod/high "
+              + " / ".join(f"{predicted[params.ATM_MODEL][lv][j]:6.1f}" for lv in params.SOLAR_ACTIVITY_LEVELS))
+    decaying = observed < 0
+    print(f"  {decaying.sum()} of {len(observed)} decaying, median {np.median(observed[decaying]):.1f} m/day; "
+          f"rising (not possible with drag alone): {', '.join(el['name'][~decaying])}")
+    plot_decay(tables, b, alt_sat_m, observed, os.path.join(FIG_DIR, "decay.png"))
+
+
+def plot_decay(tables, b, alt_sat_m, observed, path):
+    """(a) Eaglet II lifetime vs initial altitude; (b) TLE decay rate vs model."""
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    alt0_m = np.arange(300e3, 801e3, 10e3)
+    alt_plot_m = np.linspace(alt_sat_m.min() - 10e3, alt_sat_m.max() + 10e3, 50)
+    for model, style in zip(tables, ("-", "--")):
+        alt_m, rho = tables[model]
+        for level, color in zip(params.SOLAR_ACTIVITY_LEVELS, ("C0", "C1", "C3")):
+            t_years = {f: np.array([decay.lifetime(h, params.DECAY_END_ALT_KM * 1e3, alt_m, rho[level], b * f)
+                                    for h in alt0_m]) / YEAR_S for f in params.EAGLET_AREA_FACTORS}
+            ax1.plot(alt0_m / 1e3, t_years[1.0], style, color=color, label=f"{model}, {level}")
+            if model == params.ATM_MODEL:
+                ax1.fill_between(alt0_m / 1e3, t_years[min(params.EAGLET_AREA_FACTORS)],
+                                 t_years[max(params.EAGLET_AREA_FACTORS)], color=color, alpha=0.12)
+            rate = decay.decay_rate(coverage.R_E + alt_plot_m,
+                                    decay.density(alt_plot_m, alt_m, rho[level]), b) * DAY_S
+            ax2.plot(alt_plot_m / 1e3, -rate, style, color=color, label=f"{model}, {level}")
+    ax1.axhline(params.LEO_LIFETIME_LIMIT_YEARS, color="r", linestyle="--", lw=1,
+                label=f"{params.LEO_LIFETIME_LIMIT_YEARS:.0f} yr (ESSB-ST-U-007 5.4.2.3a.1)")
+    ax1.set_yscale("log")
+    ax1.set_xlabel("Initial altitude [km]")
+    ax1.set_ylabel("Orbital lifetime [yr]")
+    ax1.set_title(f"(a) Eaglet II lifetime, constant solar activity (band: area x "
+                  f"{min(params.EAGLET_AREA_FACTORS)}-{max(params.EAGLET_AREA_FACTORS)})", fontsize=10)
+    decaying = observed < 0
+    ax2.plot(alt_sat_m[decaying] / 1e3, -observed[decaying], "ko", label="IRIDE TLE, from ndot")
+    ax2.set_yscale("log")
+    ax2.set_xlabel("Altitude [km]")
+    ax2.set_ylabel("Decay rate -da/dt [m/day]")
+    ax2.set_title("(b) Decay rate: TLE vs model (area x 1)", fontsize=10)
+    for ax in (ax1, ax2):
+        ax.grid(True, which="both", alpha=0.3)
+        ax.legend(fontsize=7)
+    fig.suptitle("Orbital decay by drag, densities ECSS-E-ST-10-04C Rev.1 Annex G", fontsize=10)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
 def main():
+    parser = argparse.ArgumentParser(description="Constellation lifecycle simulator, nominal case")
+    parser.add_argument("--full", action="store_true",
+                        help="also check T* of strategy d) with the extra seeds (slower)")
+    full = parser.parse_args().full
+    print("Mode: full" if full else "Mode: fast (use --full for the T* seed check)")
     os.makedirs(FIG_DIR, exist_ok=True)
 
     print("Coverage of the reference Walker constellation")
@@ -735,10 +856,13 @@ def main():
     plot_availability_vs_order_time(sweeps, os.path.join(FIG_DIR, "availability_vs_order_time.png"))
 
     print("Fixed cadence d), search of the minimum cadence, cost comparison")
-    cost_study()
+    cost_study(full)
 
     print("Second scenario: IRIDE Eaglet II from public TLEs")
     iride_study()
+
+    print("Orbital decay (v0.3)")
+    decay_study()
     print(f"Figures saved in {FIG_DIR}/")
 
 
