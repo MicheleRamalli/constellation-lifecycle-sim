@@ -1,0 +1,14 @@
+# MASTER-8 via MATLAB interface, target circular i = 97.4 deg, epoch 2026-02-01 (requested 2027; latest available reference population), run on 2026-11-09
+# population: data_2602_all (Human-made population), target: sphere, flux in 1/(m^2 yr), debris only
+# settings: MASTER 8.2.3, data_2602_all, epoch 2026-02-01 (latest reference population; 2027 requested), sphere, ecc 0.001, 80 log classes 0.1 mm - 1 m, meteoroids excluded from these columns (Gruen: ~3e-3 for >1 mm, ~3e-7 for >1 cm, 0 for >10 cm)
+# sigma: absolute 1-sigma uncertainty, same units as flux, from output/SSO26d_h<alt>_c.dia.sigm (debris-only runs, meteoroids off); band is asymmetric: sigma_minus = nominal - nominal(-), sigma_plus = nominal(+) - nominal
+alt_km,flux_gt_1mm,flux_gt_1cm,flux_gt_10cm,sigma_minus_gt_1mm,sigma_minus_gt_1cm,sigma_minus_gt_10cm,sigma_plus_gt_1mm,sigma_plus_gt_1cm,sigma_plus_gt_10cm
+400,6.0380e-04,1.1780e-05,2.0170e-06,3.5690e-04,1.2800e-06,2.3400e-07,1.0630e-04,6.5300e-06,3.8800e-07
+450,1.0550e-03,2.1760e-05,3.5600e-06,6.2370e-04,2.3700e-06,4.1300e-07,1.8600e-04,1.2070e-05,6.8500e-07
+500,2.1240e-03,3.3580e-05,7.3260e-06,1.2557e-03,3.6500e-06,8.5100e-07,3.7300e-04,1.8630e-05,1.4080e-06
+550,2.0020e-03,4.4830e-05,5.6500e-06,1.1836e-03,4.8800e-06,6.5600e-07,3.5200e-04,2.4860e-05,1.0860e-06
+600,2.9000e-03,7.1090e-05,5.3410e-06,1.7140e-03,7.7300e-06,6.2000e-07,5.1000e-04,3.9410e-05,1.0270e-06
+650,3.4750e-03,1.3610e-04,8.7390e-06,2.0540e-03,1.4800e-05,1.0150e-06,6.1200e-04,7.5500e-05,1.6810e-06
+700,4.4660e-03,1.7210e-04,9.7050e-06,2.6400e-03,1.8700e-05,1.1260e-06,7.8600e-04,9.5500e-05,1.8650e-06
+750,9.5960e-03,2.3740e-04,1.5030e-05,5.6720e-03,2.5800e-05,1.7500e-06,1.6940e-03,1.3160e-04,2.8900e-06
+800,1.3030e-02,3.4930e-04,1.5180e-05,7.7030e-03,3.8000e-05,1.7600e-06,2.2900e-03,1.9380e-04,2.9200e-06
