@@ -2,7 +2,12 @@
 # population: data_2602_all (Human-made population), target: sphere, flux in 1/(m^2 yr), debris only
 # settings: MASTER 8.2.3, data_2602_all, epoch 2026-02-01 (latest reference population; 2027 requested), sphere, ecc 0.001, 80 log classes 0.1 mm - 1 m, meteoroids excluded from these columns (Gruen: ~3e-3 for >1 mm, ~3e-7 for >1 cm, 0 for >10 cm)
 # sigma: absolute 1-sigma uncertainty, same units as flux, from output/SSO26d_h<alt>_c.dia.sigm (debris-only runs, meteoroids off); band is asymmetric: sigma_minus = nominal - nominal(-), sigma_plus = nominal(+) - nominal
+# altitudes: 200-800 km, step 50 km (200-350 km added on 2026-11-09 with identical settings; 400-800 km rows unchanged)
 alt_km,flux_gt_1mm,flux_gt_1cm,flux_gt_10cm,sigma_minus_gt_1mm,sigma_minus_gt_1cm,sigma_minus_gt_10cm,sigma_plus_gt_1mm,sigma_plus_gt_1cm,sigma_plus_gt_10cm
+200,3.6340e-06,4.9160e-07,3.0430e-07,2.1480e-06,5.3400e-08,3.5400e-08,6.4000e-07,2.7280e-07,5.8500e-08
+250,5.1820e-06,8.1040e-07,2.0270e-07,3.0630e-06,8.8100e-08,2.3500e-08,9.1200e-07,4.4960e-07,3.9000e-08
+300,1.3220e-04,3.9250e-06,4.8590e-07,7.8140e-05,4.2700e-07,5.6400e-08,2.3300e-05,2.1770e-06,9.3400e-08
+350,7.4340e-04,7.9940e-06,6.0360e-07,4.3940e-04,8.6900e-07,7.0100e-08,1.3080e-04,4.4360e-06,1.1600e-07
 400,6.0380e-04,1.1780e-05,2.0170e-06,3.5690e-04,1.2800e-06,2.3400e-07,1.0630e-04,6.5300e-06,3.8800e-07
 450,1.0550e-03,2.1760e-05,3.5600e-06,6.2370e-04,2.3700e-06,4.1300e-07,1.8600e-04,1.2070e-05,6.8500e-07
 500,2.1240e-03,3.3580e-05,7.3260e-06,1.2557e-03,3.6500e-06,8.5100e-07,3.7300e-04,1.8630e-05,1.4080e-06
