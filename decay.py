@@ -28,6 +28,7 @@ With a constant F10.7 this is exactly the constant-activity lifetime.
 """
 
 import csv
+import json
 
 import numpy as np
 from scipy.optimize import brentq
@@ -164,6 +165,53 @@ def read_oscar_forecast(path):
     return year, month, f107
 
 
+def read_oscar_activity(json_path):
+    """Daily solar activity used by an OSCAR run (PyOscar.osg in output/dmf_output.json).
+
+    Inputs: path of dmf_output.json
+    Output: dict "date" (numpy datetime64[D]), "F10", "F3M" (81-day mean), "Ap" arrays
+    """
+    with open(json_path) as f:
+        data = json.load(f)
+    osg = find_key(data, "PyOscar.osg")
+    if osg is None:
+        raise ValueError(f"No PyOscar.osg in {json_path}")
+    day, month, year = np.array([r["date"].split("/") for r in osg]).T
+    dates = np.array([f"{y}-{m}-{d}" for d, m, y in zip(day, month, year)], dtype="datetime64[D]")
+    if np.any(np.diff(dates) != np.timedelta64(1, "D")):
+        raise ValueError("PyOscar.osg: days not consecutive")
+    return {"date": dates, **{k: np.array([float(r[k]) for r in osg]) for k in ("F10", "F3M", "Ap")}}
+
+
+def find_key(obj, key):
+    """First value of `key` in a nested dict/list (JSON), or None."""
+    if isinstance(obj, dict):
+        if key in obj:
+            return obj[key]
+        children = obj.values()
+    elif isinstance(obj, list):
+        children = obj
+    else:
+        return None
+    for child in children:
+        found = find_key(child, key)
+        if found is not None:
+            return found
+    return None
+
+
+def monthly_mean(dates, values):
+    """Mean of a daily series over each calendar month.
+
+    Inputs: dates (datetime64[D], consecutive), values
+    Output: (first month as datetime64[M], array of monthly means); the first and last
+            months may be partial (mean of the days available)
+    """
+    months = dates.astype("datetime64[M]")
+    keys = np.arange(months[0], months[-1] + np.timedelta64(1, "M"))
+    return months[0], np.array([values[months == k].mean() for k in keys])
+
+
 def density_at_f107(f107, f107_nodes, rho_levels, interp="log"):
     """Density table [kg/m^3] at the altitude nodes for one F10.7 value.
 
@@ -252,6 +300,31 @@ def lifetime_variable(alt_start_m, alt_end_m, alt_nodes_m, f107_nodes, rho_level
     """Lifetime [s] with time-varying solar activity: last time of decay_trajectory."""
     return decay_trajectory(alt_start_m, alt_end_m, alt_nodes_m, f107_nodes, rho_levels, b_m2_kg,
                             f107_series, step_s, start_index, periodic, interp)["t_s"][-1]
+
+
+# ---------------------------------------------------------------------------
+# Disposal manoeuvre (only to check the OSCAR reference runs)
+# ---------------------------------------------------------------------------
+
+def hohmann_delta_v(r1_m, r2_m):
+    """Total delta-v [m/s] of a Hohmann transfer between circular orbits of radius r1, r2 [m].
+
+    Two impulses: v_circ -> v_transfer at r1, v_transfer -> v_circ at r2 (vis-viva).
+    """
+    a_t = 0.5 * (r1_m + r2_m)
+    dv1 = abs(np.sqrt(MU * (2.0 / r1_m - 1.0 / a_t)) - np.sqrt(MU / r1_m))
+    dv2 = abs(np.sqrt(MU / r2_m) - np.sqrt(MU * (2.0 / r2_m - 1.0 / a_t)))
+    return dv1 + dv2
+
+
+def propellant_mass(delta_v_m_s, isp_s, mass_kg, mass_is_final=True):
+    """Propellant [kg] for a delta-v (Tsiolkovsky rocket equation), g0 = params.G0.
+
+    mass_is_final=True : mass_kg is the mass AFTER the manoeuvre: m_p = m (e^(dv/(Isp g0)) - 1)
+    mass_is_final=False: mass_kg is the mass BEFORE:             m_p = m (1 - e^(-dv/(Isp g0)))
+    """
+    x = delta_v_m_s / (isp_s * params.G0)
+    return mass_kg * np.expm1(x) if mass_is_final else -mass_kg * np.expm1(-x)
 
 
 def sma_rate_from_ndot(a_m, n_rad_s, ndot_rad_s2):

@@ -30,7 +30,7 @@ Figures:
 - end_of_life.png                 : residual lifetime and collision probability (> 1 cm,
                                     MASTER-8) of a failed satellite vs altitude
 - solar_cycle.png                 : solar activity scenarios (strong cycle = ECSS Table A-1,
-                                    weak cycle = OSCAR forecast) and Eaglet II residual
+                                    ESA forecast 2021 = fap_mon.dat) and Eaglet II residual
                                     lifetime vs the phase of the end of life
 - altitude_trade.png              : altitude trade-off 400-800 km: launch rate of the cheapest
                                     strategy vs debris indicators, constant activity and
@@ -60,6 +60,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.ticker import FormatStrFormatter, NullFormatter
 from scipy.integrate import quad
+from scipy.optimize import brentq
 
 import coverage
 import debris
@@ -812,19 +813,7 @@ def decay_study():
     tables = {m: decay.read_density_table(params.ATM_DENSITY_CSV, m) for m in models}
     end_m = params.DECAY_END_ALT_KM * 1e3
 
-    b_s3b = decay.ballistic_coefficient(params.DRAG_COEFFICIENT, params.S3B_AREA_M2, params.S3B_MASS_KG)
-    oscar_no_margin = params.S3B_LIFETIME_YEARS / (1.0 + params.S3B_MARGIN)
-    print(f"Sentinel-3B, circular {params.S3B_ALT_KM} km, B = {b_s3b:.4f} m^2/kg. OSCAR (latest "
-          f"prediction, time-varying activity): {params.S3B_LIFETIME_YEARS} yr incl. "
-          f"{params.S3B_MARGIN:.0%} margin, {oscar_no_margin:.2f} yr without (if multiplicative)")
-    for model, (alt_m, rho) in tables.items():
-        for level in params.SOLAR_ACTIVITY_LEVELS:
-            t_years = [decay.lifetime(params.S3B_ALT_KM * 1e3, e * 1e3, alt_m, rho[level], b_s3b) / YEAR_S
-                       for e in params.DECAY_END_SWEEP_KM]
-            print(f"  {model:8s} {level:8s} constant activity: lifetime to "
-                  + " / ".join(f"{e:.0f}" for e in params.DECAY_END_SWEEP_KM) + " km = "
-                  + " / ".join(f"{t:.3f}" for t in t_years) + " yr")
-    s3b_solar_cycle_comparison(b_s3b)
+    oscar_s3b_comparison()
 
     b = eaglet_ballistic_coefficient()
     print(f"Eaglet II: m = {params.EAGLET_MASS_KG} kg, box {params.EAGLET_BOX_M} m, "
@@ -895,21 +884,28 @@ def plot_decay(tables, b, alt_sat_m, observed, path):
 
 
 # ---------------------------------------------------------------------------
-# Time-varying solar activity (v0.3): strong cycle (ECSS Table A-1), weak cycle (OSCAR)
+# Time-varying solar activity (v0.3): strong cycle (ECSS Table A-1), ESA forecast 2021
 # ---------------------------------------------------------------------------
 
+STRONG = "strong cycle"                     # ECSS Table A-1 (solar cycle 23)
+WEAK = "ESA forecast 2021 (fap_mon.dat)"    # weak forecast cycle 25 (conservative scenario)
 MONTH_ECSS_S = params.SOLAR_MONTH_DAYS * DAY_S   # one month of Table A-1 [s]
 MONTH_CAL_S = YEAR_S / 12.0                      # one calendar month, mean length [s]
 
 
 def months_since(date, epoch_month):
-    """Calendar months from the first day of epoch_month ("YYYY-MM") to date ("YYYY-MM-DD"),
-    with the fraction of the month (day - 1) / days in that month."""
-    d = np.datetime64(date, "D")
+    """Calendar months from the first day of epoch_month ("YYYY-MM") to date ("YYYY-MM-DD" or
+    "YYYY-MM-DDThh:mm"), with the fraction of the month elapsed (to the minute)."""
+    d = np.datetime64(date, "m")
     m = d.astype("datetime64[M]")
-    days_in_month = ((m + np.timedelta64(1, "M")).astype("datetime64[D]") - m.astype("datetime64[D]")).astype(int)
+    minutes_in_month = ((m + np.timedelta64(1, "M")).astype("datetime64[m]") - m.astype("datetime64[m]")).astype(int)
     whole = (m - np.datetime64(epoch_month, "M")).astype(int)
-    return whole + (d - m.astype("datetime64[D]")).astype(int) / days_in_month
+    return whole + (d - m.astype("datetime64[m]")).astype(int) / minutes_in_month
+
+
+def seconds_between(start, end):
+    """Seconds from date start to date end ("YYYY-MM-DD[Thh:mm[:ss]]")."""
+    return (np.datetime64(end, "s") - np.datetime64(start, "s")).astype(int) * 1.0
 
 
 def solar_scenarios(index=params.SOLAR_INDEX):
@@ -918,24 +914,25 @@ def solar_scenarios(index=params.SOLAR_INDEX):
     Each scenario: dict with
       "f107"         : F10.7 of each month [sfu]
       "step_s"       : length of one month [s]
-      "periodic"     : the series repeats (strong cycle) or not (weak cycle)
+      "periodic"     : the series repeats (strong cycle) or not (ESA forecast 2021)
       "period_months": length of the repeated cycle, or None
       "range_months" : (first, last) start phase of one full cycle (uniform phase draws)
       "phase_of"     : function date -> phase (index of the series, fractional)
-    "weak cycle" is missing if the DRAMA file is not installed (message printed).
+    WEAK is missing if the DRAMA file is not installed (message printed).
+    Keys: STRONG, WEAK.
     """
     f_cycle = decay.read_solar_cycle(params.SOLAR_CYCLE_CSV, index)
 
     def strong_phase(date, cycle25_start=params.CYCLE25_START):
         start = cycle25_start if np.datetime64(date) >= np.datetime64(cycle25_start) else params.CYCLE24_START
-        return (np.datetime64(date, "D") - np.datetime64(start, "D")).astype(int) * DAY_S / MONTH_ECSS_S
+        return seconds_between(start, date) / MONTH_ECSS_S
 
     scen = {"strong cycle": {"f107": f_cycle, "step_s": MONTH_ECSS_S, "periodic": True,
                              "period_months": float(len(f_cycle)),
                              "range_months": (0.0, float(len(f_cycle))), "phase_of": strong_phase,
                              "source": f"ECSS-E-ST-10-04C Rev.1 Table A-1 (cycle 23, {index})"}}
     if not os.path.exists(params.OSCAR_FORECAST_PATH):
-        print(f"  NOTE: {params.OSCAR_FORECAST_PATH} not found: 'weak cycle' scenario skipped")
+        print(f"  NOTE: {params.OSCAR_FORECAST_PATH} not found: scenario '{WEAK}' skipped")
         return scen
     year, month, f_oscar = decay.read_oscar_forecast(params.OSCAR_FORECAST_PATH)
     epoch = f"{year[0]:04d}-{month[0]:02d}"
@@ -943,10 +940,10 @@ def solar_scenarios(index=params.SOLAR_INDEX):
     # end of cycle 25 in the forecast: minimum of F10.7 between 5 and 15 yr after its start
     window = np.arange(int(first) + 60, int(first) + 180)
     last = float(window[np.argmin(f_oscar[window])])
-    scen["weak cycle"] = {"f107": f_oscar, "step_s": MONTH_CAL_S, "periodic": False,
+    scen[WEAK] = {"f107": f_oscar, "step_s": MONTH_CAL_S, "periodic": False,
                           "period_months": None, "range_months": (first, last),
                           "phase_of": lambda date: months_since(date, epoch),
-                          "source": f"ESA forecast used by OSCAR ({params.OSCAR_FORECAST_INFO})"}
+                          "source": f"{params.OSCAR_FORECAST_INFO}, weak forecast cycle 25"}
     return scen
 
 
@@ -964,35 +961,152 @@ def lifetime_scenario(alt_start_m, b, scen, phase, model=params.ATM_MODEL, inter
                                    phase, scen["periodic"], interp)
 
 
-def s3b_solar_cycle_comparison(b_s3b):
-    """Sentinel-3B lifetime with time-varying activity vs OSCAR (no tuning)."""
-    oscar_yr = params.S3B_LIFETIME_YEARS / (1.0 + params.S3B_MARGIN)
-    h0 = params.S3B_ALT_KM * 1e3
-    print(f"Sentinel-3B with time-varying solar activity, start {params.S3B_START} "
-          f"(OSCAR {oscar_yr:.2f} yr without margin):")
-    for name, scen in solar_scenarios().items():
-        phase = scen["phase_of"](params.S3B_START)
-        t_yr = lifetime_scenario(h0, b_s3b, scen, phase) / YEAR_S
-        print(f"  {name:12s} ({scen['source']}), phase {phase:.1f} months: {t_yr:.2f} yr "
-              f"({t_yr / oscar_yr - 1:+.0%} vs OSCAR)")
-        if name == "strong cycle":
-            sens = [("ln(rho) -> rho linear in F10.7",
-                     lifetime_scenario(h0, b_s3b, scen, phase, interp=params.SOLAR_INTERP_SENSITIVITY)),
-                    (params.SOLAR_INDEX_SENSITIVITY,
-                     lifetime_scenario(h0, b_s3b, solar_scenarios(params.SOLAR_INDEX_SENSITIVITY)["strong cycle"],
-                                       phase)),
-                    (params.ATM_MODEL_SENSITIVITY,
-                     lifetime_scenario(h0, b_s3b, scen, phase, model=params.ATM_MODEL_SENSITIVITY)),
-                    ("phase +6 months", lifetime_scenario(h0, b_s3b, scen, phase + 6)),
-                    ("phase -6 months", lifetime_scenario(h0, b_s3b, scen, phase - 6))]
-            print("    sensitivity: " + "; ".join(f"{k} {v / YEAR_S:.2f} yr" for k, v in sens))
-        else:
-            print("    diagnostic: same solar input as OSCAR, so the gap is due to the atmosphere model as "
-                  "used here. Plausible causes (not corrected): Ap tied to F10.7 by the ECSS tables (Ap ~ 1-3 "
-                  "at F10.7 ~ 70-80, forecast Ap ~ 5-13 -> our density lower, lifetime longer); ECSS tables "
-                  "equatorial and averaged over diurnal and seasonal variations vs the full NRLMSISE-00 along "
-                  "the SSO orbit in OSCAR; 13-month smoothed indices; re-entry altitude and margin convention")
-    print_cycle_warning(solar_scenarios())
+def s3b_ballistic_coefficient():
+    """B of Sentinel-3B [m^2/kg], same C_D, area and mass as the OSCAR runs."""
+    return decay.ballistic_coefficient(params.DRAG_COEFFICIENT, params.S3B_AREA_M2, params.S3B_MASS_KG)
+
+
+def oscar_output_path(run):
+    """Path of output/dmf_output.json of one OSCAR run (read at run time, never copied)."""
+    return os.path.join(os.path.expanduser(run["folder"]), params.OSCAR_OUTPUT_FILE)
+
+
+def oscar_series_scenario(run):
+    """Our solar input from the series of an OSCAR run: monthly mean of its daily F3M.
+
+    Output: scenario dict as solar_scenarios (calendar months, not periodic), or None if
+    the run folder is missing.
+    """
+    path = oscar_output_path(run)
+    if not os.path.exists(path):
+        return None
+    act = decay.read_oscar_activity(path)
+    first, f3m = decay.monthly_mean(act["date"], act["F3M"])
+    epoch = str(first)
+    return {"f107": f3m, "step_s": MONTH_CAL_S, "periodic": False,
+            "phase_of": lambda date: months_since(date, epoch),
+            "source": f"OSCAR PyOscar.osg F3M, monthly mean ({run['folder']})"}
+
+
+def s3b_lifetime_function(run, model, interp):
+    """Function circular altitude [m] -> our Sentinel-3B lifetime [s] for the input of one run.
+
+    run["activity"]: "constant moderate" (ECSS table, closed form), "strong cycle" (Table A-1
+    from S3B_START) or "OSCAR series" (the run's own F3M). None if that input is missing.
+    """
+    b = s3b_ballistic_coefficient()
+    end_m = params.DECAY_END_ALT_KM * 1e3
+    alt_m, levels = rho_levels(model)
+    if run["activity"] == "constant moderate":
+        rho = levels[params.SOLAR_ACTIVITY_LEVELS.index("moderate")]
+        return lambda h_m: decay.lifetime(h_m, end_m, alt_m, rho, b)
+    scen = solar_scenarios()[STRONG] if run["activity"] == "strong cycle" else oscar_series_scenario(run)
+    if scen is None:
+        return None
+    phase = scen["phase_of"](params.S3B_START)
+    return lambda h_m: decay.lifetime_variable(h_m, end_m, alt_m, params.SOLAR_F107_NODES, levels, b,
+                                               scen["f107"], scen["step_s"], phase, scen["periodic"], interp)
+
+
+def equivalent_altitude(life_fn, target_s, lo_m, hi_m):
+    """Circular altitude [m] in [lo_m, hi_m] where our lifetime equals target_s (brentq, like
+    fzero, on the lifetime that grows monotonically with the altitude)."""
+    return brentq(lambda h: life_fn(h) - target_s, lo_m, hi_m, xtol=1.0)
+
+
+def oscar_s3b_comparison():
+    """Like-for-like comparison with the three OSCAR runs on Sentinel-3B (no tuning).
+
+    Each run is compared from ITS circular disposal altitude with ITS solar input. Reference =
+    lifetime propagated by OSCAR (final date - start). Also the altitude that gives OSCAR's
+    lifetime with our model, and the delta-v / propellant check of the OSCAR outputs.
+    Output: {run: {(model, interp): {"life_s", "oscar_s", "h_eq_m"}}}
+    """
+    print(f"Sentinel-3B vs DRAMA 4.1.4 OSCAR, three runs, start {params.S3B_START} UTC, circular orbit, "
+          f"B = {s3b_ballistic_coefficient():.4f} m^2/kg; reference = OSCAR propagated lifetime:")
+    results = {}
+    for name, run in params.OSCAR_S3B_RUNS.items():
+        h_osc_m = run["perigee_km"] * 1e3
+        oscar_s = run["lifetime_years"] * YEAR_S
+        check_s = seconds_between(params.S3B_START, run["reentry"].replace(" ", "T"))
+        print(f"  {name} ({run['solar_option']}): OSCAR altitude {run['perigee_km']} km, lifetime "
+              f"{run['lifetime_years']} yr (re-entry {run['reentry']} - start = {check_s / YEAR_S:.4f} yr)")
+        rows = {}
+        interps = ("-",) if run["activity"] == "constant moderate" else (params.SOLAR_INTERP_REF,
+                                                                        params.SOLAR_INTERP_SENSITIVITY)
+        for model in (params.ATM_MODEL, params.ATM_MODEL_SENSITIVITY):
+            for interp in interps:
+                life_fn = s3b_lifetime_function(run, model, interp if interp != "-" else params.SOLAR_INTERP_REF)
+                if life_fn is None:
+                    break
+                life_s = life_fn(h_osc_m)
+                h_eq_m = equivalent_altitude(life_fn, oscar_s, h_osc_m - 150e3, h_osc_m + 150e3)
+                rows[(model, interp)] = {"life_s": life_s, "oscar_s": oscar_s, "h_eq_m": h_eq_m}
+                print(f"    {model:8s} {interp:6s}: ours {life_s / YEAR_S:6.2f} yr ({life_s / oscar_s - 1:+6.1%}); "
+                      f"altitude giving OSCAR's lifetime {h_eq_m / 1e3:7.2f} km ({(h_eq_m - h_osc_m) / 1e3:+6.2f} km)")
+        if not rows:
+            print(f"    SKIPPED: {oscar_output_path(run)} not found")
+        results[name] = rows
+        r1, r2 = params.S3B_SMA_INITIAL_KM * 1e3, params.R_EARTH + h_osc_m
+        dv = decay.hohmann_delta_v(r1, r2)
+        mp_final = decay.propellant_mass(run["delta_v_m_s"], params.S3B_ISP_S, params.S3B_MASS_KG, True)
+        mp_initial = decay.propellant_mass(run["delta_v_m_s"], params.S3B_ISP_S, params.S3B_MASS_KG, False)
+        print(f"    check: Hohmann a = {params.S3B_SMA_INITIAL_KM} km -> R_eq + {run['perigee_km']} km: "
+              f"{dv:.2f} m/s (OSCAR {run['delta_v_m_s']}); propellant, Isp {params.S3B_ISP_S:.0f} s, "
+              f"{params.S3B_MASS_KG:.0f} kg as FINAL mass {mp_final:.2f} kg, as initial {mp_initial:.2f} kg "
+              f"(OSCAR {run['propellant_kg']})")
+    run = params.OSCAR_S3B_RUNS["constant moderate"]
+    alt_m, rho = decay.read_density_table(params.ATM_DENSITY_CSV, params.ATM_MODEL)
+    t_end = [decay.lifetime(run["perigee_km"] * 1e3, e * 1e3, alt_m, rho["moderate"], s3b_ballistic_coefficient())
+             / YEAR_S for e in params.DECAY_END_SWEEP_KM]
+    print(f"  Re-entry altitude sensitivity (constant moderate, {params.ATM_MODEL}): lifetime to "
+          + " / ".join(f"{e:.0f}" for e in params.DECAY_END_SWEEP_KM) + " km = "
+          + " / ".join(f"{t:.3f}" for t in t_end) + " yr")
+    print("  OSCAR treats the 1130 kg as the mass AFTER the manoeuvre (rocket equation with final mass "
+          "reproduces requiredPropellantMass). Altitudes measured from the equatorial radius reproduce "
+          "OSCAR's delta-v.")
+    oscar_input_checks()
+    flattening_km = (params.R_EARTH - params.R_EARTH_POLAR) * np.sin(np.radians(params.S3B_INC_DEG)) ** 2 / 2 / 1e3
+    print("  Remaining gap, plausible causes (NOT corrected): (1) Earth oblateness, HYPOTHESIS to verify "
+          "(how DRAMA defines the altitude): if the altitude is measured from the equatorial radius, on a "
+          f"circular orbit with i = {params.S3B_INC_DEG} deg the mean geodetic altitude is higher by "
+          f"(R_eq - R_pol) <sin^2(lat)> = (R_eq - R_pol) sin^2(i) / 2 = {flattening_km:.1f} km, the same order "
+          "as the altitude differences above; (2) ECSS tables equatorial and averaged over diurnal and "
+          "seasonal variations vs the full NRLMSISE-00 along the sun-synchronous orbit in OSCAR; (3) daily "
+          "F10.7 + 81-day mean in OSCAR vs monthly mean of the 81-day index here; (4) Ap: step of the daily "
+          "F10.7 in OSCAR vs continuous in F10.7 here; (5) mean elements vs circular orbit; re-entry "
+          f"altitude {params.DECAY_END_ALT_KM:.0f} km (< 0.01 yr)")
+    return results
+
+
+def oscar_input_checks():
+    """Solar input of the OSCAR runs vs ours: ECSS run F3M vs our F81mean, Ap steps, constant run."""
+    runs = params.OSCAR_S3B_RUNS
+    path = oscar_output_path(runs["ECSS cycle 23"])
+    if os.path.exists(path):
+        act = decay.read_oscar_activity(path)
+        end = np.datetime64(runs["ECSS cycle 23"]["reentry"][:10], "D")
+        sel = (act["date"] >= np.datetime64(params.S3B_START[:10], "D")) & (act["date"] <= end)
+        f81 = solar_scenarios()[STRONG]["f107"]
+        phase = np.array([seconds_between(params.CYCLE24_START, str(d)) / MONTH_ECSS_S for d in act["date"][sel]])
+        diff = act["F3M"][sel] - f81[np.floor(phase).astype(int) % len(f81)]
+        steps = "; ".join(f"Ap {a:.0f} for daily F10 {act['F10'][act['Ap'] == a].min():.0f}-"
+                          f"{act['F10'][act['Ap'] == a].max():.0f}" for a in np.unique(act["Ap"]))
+        print(f"  Input check, ECSS run ({params.S3B_START[:10]} to re-entry): OSCAR F3M - our F81mean: mean "
+              f"{diff.mean():+.1f} sfu, mean |.| {np.abs(diff).mean():.1f} sfu, max |.| {np.abs(diff).max():.0f} "
+              f"sfu. OSCAR Ap is a step of the daily F10: {steps} (ours: continuous, 0/15/45 at 65/140/250)")
+    path = oscar_output_path(runs["latest prediction"])
+    if os.path.exists(path):
+        act = decay.read_oscar_activity(path)
+        i = np.argmax(act["F3M"][act["date"] <= np.datetime64("2032-12-31")])
+        print(f"  Input check, latest-prediction run: observed F3M peak {act['F3M'][i]:.0f} sfu on "
+              f"{act['date'][i]} (cycle 25 observed strong); daily F10 up to {act['F10'].max():.0f} sfu, "
+              "monthly means of F3M used here stay inside 65-250 sfu")
+    path = oscar_output_path(runs["constant moderate"])
+    if os.path.exists(path):
+        act = decay.read_oscar_activity(path)
+        same = np.all(act["F10"] == 140) and np.all(act["F3M"] == 140) and np.all(act["Ap"] == 15)
+        print(f"  Input check, constant run: F10 = F3M = 140, Ap = 15 every day: {same} (= ECSS Table G-2)")
 
 
 def cycle_peak(scen):
@@ -1005,8 +1119,10 @@ def print_cycle_warning(scen):
     """The strong cycle is not conservative for the 5-year rule: say it with every result."""
     text = f"  NOTE: strong cycle = solar cycle 23, peak F10.7 {cycle_peak(scen['strong cycle']):.0f} sfu: it " \
            "shortens the lifetimes, so it is NOT conservative for the 5-year rule"
-    if "weak cycle" in scen:
-        text += f"; weak cycle = forecast cycle 25 used by OSCAR, peak {cycle_peak(scen['weak cycle']):.0f} sfu"
+    if WEAK in scen:
+        text += (f"; {WEAK}: weak forecast cycle 25, peak {cycle_peak(scen[WEAK]):.0f} sfu (conservative). "
+                 "The OBSERVED cycle 25 was strong (OSCAR latest-prediction series: F3M peak ~225 sfu "
+                 "in 10/2024, about as cycle 23)")
     print(text)
 
 
@@ -1064,7 +1180,7 @@ def over_cycle(table, phase):
 def plot_solar_cycle(scen, cyc, alt_op_m, const, path):
     """(a) F10.7 of the two scenarios; (b) residual lifetime vs phase of the end of life."""
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
-    colors = {"strong cycle": "tab:red", "weak cycle": "tab:blue"}
+    colors = {"strong cycle": "tab:red", WEAK: "tab:blue"}
     for name, s in scen.items():
         lo, hi = s["range_months"]
         k = np.arange(int(lo), int(hi) + 1)
@@ -1323,11 +1439,11 @@ def solar_cycle_debris(out, const):
 
     phases = {name: s["phase_of"](params.IRIDE_FIRST_LAUNCH) for name, s in scen.items()}
     phase_ecss = scen["strong cycle"]["phase_of"](params.IRIDE_FIRST_LAUNCH, params.CYCLE25_START_ECSS_ONLY)
-    lo_weak = scen["weak cycle"]["range_months"][0] if "weak cycle" in scen else 0.0
+    lo_weak = scen[WEAK]["range_months"][0] if WEAK in scen else 0.0
     print(f"IRIDE first launch {params.IRIDE_FIRST_LAUNCH}: phase of cycle 25 = "
           f"{phases['strong cycle']:.1f} months of 30 d (strong, cycle 25 from {params.CYCLE25_START}, "
           f"DRAMA solcycle.lst; {phase_ecss:.1f} with the ECSS-only start {params.CYCLE25_START_ECSS_ONLY})"
-          + (f", {phases['weak cycle'] - lo_weak:.1f} calendar months (weak)" if "weak cycle" in phases else ""))
+          + (f", {phases[WEAK] - lo_weak:.1f} calendar months ({WEAK})" if WEAK in phases else ""))
 
     p_m = params.DISPOSAL_PROB_REF
     cases = {f"constant {lv}": {lv: const[lv]} for lv in params.SOLAR_ACTIVITY_LEVELS}
@@ -1341,7 +1457,7 @@ def solar_cycle_debris(out, const):
     for label, tables in cases.items():
         ind = list(debris_indicators(out, tables, p_m).values())[0]
         mc[label] = ind
-        print(f"  {label:42s} {mean_5_95(ind['frac_compliant']):>22s} "
+        print(f"  {label:48s} {mean_5_95(ind['frac_compliant']):>22s} "
               f"{mean_5_95(ind['obj_years_committed'] / YEAR_S):>28s} {ind['collisions'].mean():.2e}")
     print_cycle_warning(scen)
     plot_solar_cycle(scen, cyc, alt_m, const, os.path.join(FIG_DIR, "solar_cycle.png"))
@@ -1485,13 +1601,13 @@ def altitude_trade(cost_ref):
                   "equivalent to the requirement")
     print(f"Same trade with the solar cycle (phase of the mission start uniform per run; failed "
           f"lifetime over the phases, grid {params.SOLAR_PHASE_GRID_TRADE_MONTHS:.0f} months):")
-    print(f"{'h [km]':>6s} {'scenario':>13s} {'failed lifetime mean (5-95 %) [yr]':>36s} "
+    print(f"{'h [km]':>6s} {'scenario':>31s} {'failed lifetime mean (5-95 %) [yr]':>36s} "
           f"{'objects compliant':>18s} {'dead obj-yr/run':>16s} {'collisions/run':>15s}")
     for r in rows:
         for name in solar:
             life = r[f"life_failed_{name}"]
             bound = ">=" if r[f"censored_{name}"] else "  "
-            print(f"{r['alt_km']:6.0f} {name:>13s} {bound}{life.mean():8.1f} ({np.percentile(life, 5):6.1f}-"
+            print(f"{r['alt_km']:6.0f} {name:>31s} {bound}{life.mean():8.1f} ({np.percentile(life, 5):6.1f}-"
                   f"{np.percentile(life, 95):6.1f}){'':10s} {r[f'compliant_{name}']:18.2f} "
                   f"{bound}{r[f'objyr_{name}']:14.1f} {r[f'collisions_{name}']:15.1e}")
     if any(r[f"censored_{n}"] for r in rows for n in solar):
@@ -1506,7 +1622,7 @@ def short_label(label):
     return label.replace(" per plane", "").replace(" early ordering", "")
 
 
-CYCLE_STYLE = {"strong cycle": ("s--", "tab:brown"), "weak cycle": ("D--", "tab:green")}
+CYCLE_STYLE = {"strong cycle": ("s--", "tab:brown"), WEAK: ("D--", "tab:green")}
 
 
 def mark_lower_bounds(ax, rows, name, values, color):

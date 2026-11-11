@@ -179,3 +179,87 @@ def test_oscar_forecast_file():
     after = year >= 2008
     assert f107[after].min() >= F_NODES[0] and f107[after].max() <= F_NODES[-1]
     assert (year[-1], month[-1]) == (2129, 12)
+
+
+# ---------------------------------------------------------------------------
+# OSCAR reference runs on Sentinel-3B (read at run time; skipped if not on this machine)
+# ---------------------------------------------------------------------------
+
+def oscar_path(name):
+    run = params.OSCAR_S3B_RUNS[name]
+    return os.path.join(os.path.expanduser(run["folder"]), params.OSCAR_OUTPUT_FILE)
+
+
+def oscar_json(name):
+    import json
+    with open(oscar_path(name)) as f:
+        return json.load(f)
+
+
+def test_monthly_mean_partial_months():
+    dates = np.arange(np.datetime64("2018-04-17"), np.datetime64("2018-06-03"))
+    values = np.arange(len(dates), dtype=float)
+    first, mean = decay.monthly_mean(dates, values)
+    assert first == np.datetime64("2018-04") and len(mean) == 3
+    assert mean[0] == pytest.approx(values[:14].mean())          # 17-30 April
+    assert mean[2] == pytest.approx(values[-2:].mean())          # 1-2 June
+
+
+def test_hohmann_and_rocket_equation():
+    """Hohmann: zero for r1 = r2, small transfer = |dv| of the vis-viva difference; rocket
+    equation: final-mass and initial-mass forms consistent (m0 = mf + mp)."""
+    r = decay.R_E + 700e3
+    assert decay.hohmann_delta_v(r, r) == 0.0
+    dr = 1.0
+    assert decay.hohmann_delta_v(r, r - dr) == pytest.approx(np.sqrt(decay.MU / r) * dr / (2 * r), rel=1e-4)
+    mp_f = decay.propellant_mass(100.0, 200.0, 1000.0, mass_is_final=True)
+    mp_i = decay.propellant_mass(100.0, 200.0, 1000.0 + mp_f, mass_is_final=False)
+    assert mp_i == pytest.approx(mp_f, rel=1e-12)
+
+
+@pytest.mark.parametrize("name", list(params.OSCAR_S3B_RUNS))
+def test_oscar_reference_values(name):
+    """params.OSCAR_S3B_RUNS = PyOscar.oop; propagated lifetime = re-entry - start; our Hohmann
+    delta-v and rocket equation (1130 kg = mass AFTER the manoeuvre) reproduce OSCAR."""
+    if not os.path.exists(oscar_path(name)):
+        pytest.skip("OSCAR run not on this machine")
+    run = params.OSCAR_S3B_RUNS[name]
+    oop = decay.find_key(oscar_json(name), "PyOscar.oop")
+    assert oop["perigeeAltitudeRequiredMatchUserDefinedLifetimeLimit"] == run["perigee_km"]
+    assert oop["lifetime"] == run["lifetime_years"] and oop["finalDate"] == run["reentry"]
+    assert oop["requiredDeltaV"] == run["delta_v_m_s"]
+    assert oop["requiredPropellantMass"] == pytest.approx(run["propellant_kg"])
+    t_s = (np.datetime64(run["reentry"].replace(" ", "T"), "s")
+           - np.datetime64(params.S3B_START, "s")).astype(int)
+    assert t_s / YEAR_S == pytest.approx(run["lifetime_years"], abs=0.01)
+    dv = decay.hohmann_delta_v(params.S3B_SMA_INITIAL_KM * 1e3, decay.R_E + run["perigee_km"] * 1e3)
+    assert dv == pytest.approx(run["delta_v_m_s"], abs=0.05)
+    mp = decay.propellant_mass(run["delta_v_m_s"], params.S3B_ISP_S, params.S3B_MASS_KG, mass_is_final=True)
+    assert mp == pytest.approx(run["propellant_kg"], abs=0.05)
+    assert abs(decay.propellant_mass(run["delta_v_m_s"], params.S3B_ISP_S, params.S3B_MASS_KG, False)
+               - run["propellant_kg"]) > 2.0                     # initial-mass form does not match
+
+
+def test_oscar_constant_series_gives_constant_lifetime():
+    """The daily series of the OSCAR constant run (F3M = 140 every day), monthly means, through
+    our month-by-month decay = closed-form lifetime with the ECSS moderate table."""
+    if not os.path.exists(oscar_path("constant moderate")):
+        pytest.skip("OSCAR run not on this machine")
+    act = decay.read_oscar_activity(oscar_path("constant moderate"))
+    assert np.all(act["F3M"] == 140.0) and np.all(act["Ap"] == 15.0)
+    _, f3m = decay.monthly_mean(act["date"], act["F3M"])
+    b = decay.ballistic_coefficient(params.DRAG_COEFFICIENT, params.S3B_AREA_M2, params.S3B_MASS_KG)
+    h = params.OSCAR_S3B_RUNS["constant moderate"]["perigee_km"] * 1e3
+    t_var = decay.lifetime_variable(h, END_M, ALT_M, F_NODES, RHO_LEVELS, b, f3m, YEAR_S / 12, 0.83,
+                                    periodic=False)
+    assert t_var == pytest.approx(decay.lifetime(h, END_M, ALT_M, RHO["moderate"], b), rel=1e-9)
+
+
+def test_equivalent_altitude_returns_target():
+    """brentq altitude: our lifetime there equals the target lifetime."""
+    import main
+    b = decay.ballistic_coefficient(params.DRAG_COEFFICIENT, params.S3B_AREA_M2, params.S3B_MASS_KG)
+    life = lambda h: decay.lifetime(h, END_M, ALT_M, RHO["moderate"], b)
+    target = 14.259 * YEAR_S
+    h_eq = main.equivalent_altitude(life, target, 500e3, 800e3)
+    assert life(h_eq) == pytest.approx(target, rel=1e-4)

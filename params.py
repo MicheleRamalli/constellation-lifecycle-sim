@@ -117,6 +117,9 @@ SEEDS_CHECK = (43, 44)                     # extra seeds to check the sensitivit
 MU_EARTH = 3.986004418e14   # gravitational parameter [m^3/s^2], WGS84 (to be checked on the reference)
 R_EARTH = 6378137.0         # equatorial radius [m], WGS84 (to be checked on the reference)
 OMEGA_EARTH = 7.292115e-5   # Earth rotation rate [rad/s], WGS84 (to be checked on the reference)
+R_EARTH_POLAR = 6356752.3142  # polar radius [m], WGS84 (to be checked on the reference); only
+                              # for the oblateness estimate in the OSCAR comparison (main.py)
+G0 = 9.80665                # standard gravity [m/s^2] (conventional value, CGPM 1901), rocket equation
 J2_EARTH = 1.08263e-3       # second zonal harmonic [-], Vallado, Fundamentals of Astrodynamics
                             # and Applications, 4th ed. 2013 (to be checked on the reference)
 TROPICAL_YEAR_DAYS = 365.2422  # tropical year [days], sets the sun-synchronous RAAN rate
@@ -288,11 +291,14 @@ SOLAR_INDEX_SENSITIVITY = "F10mean"  # monthly mean of the daily F10.7
 SOLAR_MONTH_DAYS = 30.0              # Table A-1: 30-day (1 month) intervals
 # ASSUMPTION: Table A-1 month 0 = start (minimum) of the cycle, and the cycle repeats with
 # period 140 months (11.5 yr); needed because lifetimes exceed one cycle.
-# Scenario "weak cycle": ESA long-term forecast used by OSCAR ("latest prediction"), file
-# TOOLS/OSCAR/data/fap_mon.dat of DRAMA 4.1.4, header "Last Update: 2021 May 4", last definitive
-# point 10/2020, prediction to 12/2129. Column used: predicted 13-month centred mean F10.7.
-# Cycle 25 peak ~146 sfu (2025). Read at run time, NEVER copied into this repository; if the
-# file is missing the scenario is skipped. Calendar months (step = 1/12 yr), not periodic.
+# Scenario "ESA forecast 2021 (fap_mon.dat)" (conservative, weak cycle 25): ESA long-term
+# forecast in TOOLS/OSCAR/data/fap_mon.dat of DRAMA 4.1.4, header "Last Update: 2021 May 4", last
+# definitive point 10/2020, prediction to 12/2129. Column used: predicted 13-month centred mean
+# F10.7. Forecast cycle 25 peak ~146 sfu (2025). NOTE: the OBSERVED cycle 25 was strong: the
+# observed series used by OSCAR "latest prediction" (OSCAR_S3B_RUNS below) has F3M peak 225 sfu
+# on 2024-10-09, about as cycle 23 (224). This file was NOT used by those OSCAR runs. Read at run
+# time, NEVER copied into this repository; if the file is missing the scenario is skipped.
+# Calendar months (step = 1/12 yr), not periodic.
 OSCAR_FORECAST_PATH = "/Applications/DRAMA-4.1.4/TOOLS/OSCAR/data/fap_mon.dat"
 OSCAR_FORECAST_INFO = "DRAMA 4.1.4 fap_mon.dat, last update 2021-05-04"
 # Start dates of the solar cycles (phase 0):
@@ -307,8 +313,8 @@ CYCLE25_START = "2020-01-01"
 CYCLE25_START_ECSS_ONLY = "2020-06-01"  # 2008-12-01 + 140 x 30 days (sensitivity)
 # Phase of the start of the mission (lifecycle time t = 0 = first launch):
 # general case: ASSUMPTION uniform over one cycle, one draw per Monte Carlo run (launch date
-# unknown with respect to the cycle); strong cycle 0-140 months; weak cycle from the start of
-# cycle 25 to the next minimum of the forecast (found in the file).
+# unknown with respect to the cycle); strong cycle 0-140 months; ESA forecast 2021 from the start
+# of cycle 25 to the next minimum of the forecast (found in the file).
 # IRIDE case: first launch of the Eaglet II satellites 2025-11-28 (date given by the user,
 # TO VERIFY with a public launch record).
 IRIDE_FIRST_LAUNCH = "2025-11-28"
@@ -316,20 +322,61 @@ SOLAR_PHASE_SEED_STREAM = 8  # seed sequence [SEED, 8] of the mission start phas
 SOLAR_PHASE_GRID_MONTHS = 1.0  # spacing of the phase grid of the residual lifetime tables [months]
 SOLAR_PHASE_GRID_TRADE_MONTHS = 3.0  # coarser grid in the altitude trade (run time; the residual
                                     # lifetime varies smoothly with the phase at 600-800 km)
-# Weak cycle: the forecast ends in 12/2129; where the decay is not over by then (800 km) the
+# ESA forecast 2021: the file ends in 12/2129; where the decay is not over by then (800 km) the
 # lifetime is reported as a LOWER bound ('>='), no extrapolation.
 
-# --- Reference case for decay.py: DRAMA 4.1.4 OSCAR, Sentinel-3B tutorial (run by the user) ---
-# Circular orbit, C_D 2.2, NRLMSISE-00, ESA "latest prediction" solar activity, start 2018-04-26;
-# result 14.28 yr INCLUDING a 5 % lifetime margin (OSCAR documentation: recommended by
-# ISO 27852:2024), re-entry 2032-08-08.
-S3B_ALT_KM = 600.27
+# --- Reference case for decay.py: DRAMA 4.1.4 OSCAR, Sentinel-3B (three runs by the user) ---
+# OSCAR v2.5.2, FOCUS v2.6.2, geopotential GEM-T1 (6x6), drag NRLMSISE-00 (PyOscar.oop of each
+# run). Input (input/dmf_input.json): initial orbit a = 7186.84 km, e = 0.00085, i = 98.62 deg
+# (mean elements), disposal "Circular Delayed De-Orbit", lifetime limit 15 yr, lifetime margin
+# 5 %, 1 Hohmann transfer. OSCAR searches the circular disposal altitude (bisection) whose
+# propagated lifetime matches the limit, then gives delta-v and propellant.
+# Lifetime margin: DRAMA 4.1.4 documentation, docu/software_operation/single_analysis_tools/
+# OSCAR/oscar_operation.html (HTML, no page numbers), section on the disposal options: "The
+# Lifetime margin accounts for force model and integration errors. A recommended value by ISO
+# 27852:2024 is 5 %". ISO 27852 itself not read. ASSUMPTION on how it is applied (not stated in
+# the documentation): the outputs are compatible both with a target 15 / 1.05 = 14.286 yr and
+# with 15 x 0.95 = 14.25 yr (14.283 is closer to the first, 14.259 to the second); with the
+# bisection tolerance the two cannot be told apart. The comparison uses the PROPAGATED lifetime
+# of each run (= final date - start), so it does not depend on this choice.
 S3B_INC_DEG = 98.62
 S3B_AREA_M2 = 16.435
 S3B_MASS_KG = 1130.0
-S3B_LIFETIME_YEARS = 14.28
-S3B_MARGIN = 0.05
-S3B_START = "2018-04-26"  # start date of the OSCAR run (phase of cycle 24 for the strong cycle)
+S3B_START = "2018-04-26T15:44"   # start of the OSCAR runs (UTC)
+S3B_SMA_INITIAL_KM = 7186.84     # initial semi-major axis (input), for the Hohmann delta-v check
+S3B_ISP_S = 200.0                # input/dmf_input.json "specificImpulse": 200 (disposal system
+                                 # "Chemical Propulsion"), for the propellant check (main.py)
+# One entry per run, values from output/dmf_output.json (PyOscar.oop) of each folder; solar data
+# files from logs/Oscar-*.log. "activity": input of our model for the same comparison.
+OSCAR_S3B_RUNS = {
+    "constant moderate": {
+        "folder": "~/DRAMA_projects/S3B_constant_moderate",
+        "solar_option": "Constant F10.7 = 140, Ap = 15",
+        "solar_files": "none (constant indices)",
+        "activity": "constant moderate",   # ECSS Table G-2: F10.7 = F10.7avg = 140, Ap = 15 (same)
+        "perigee_km": 634.05, "lifetime_years": 14.259, "reentry": "2032-07-29 22:15:16",
+        "delta_v_m_s": 92.17, "propellant_kg": 54.35},
+    "ECSS cycle 23": {
+        "folder": "~/S3B_ECSS_cycle23",
+        "solar_option": "ECSS sample solar cycle (cycle 23 repeated, start 2008-12-01 in the log)",
+        "solar_files": "DRAMA TOOLS/OSCAR/data/ecss.dat",
+        "activity": "strong cycle",        # our Table A-1 F81mean, phase from CYCLE24_START
+        "perigee_km": 614.69, "lifetime_years": 14.283, "reentry": "2032-08-08 00:19:52",
+        "delta_v_m_s": 102.59, "propellant_kg": 60.66},
+    "latest prediction": {
+        "folder": "~/DRAMA_projects/DRAMA_example",
+        "solar_option": "Latest prediction (ESA data), covered by observed data, no forecast",
+        "solar_files": "ESA daily file of 2025-09-17, ESA monthly file of 2025-08-25 (log)",
+        "activity": "OSCAR series",        # PyOscar.osg F3M, monthly means (read at run time)
+        "perigee_km": 600.27, "lifetime_years": 14.283, "reentry": "2032-08-08 00:58:58",
+        "delta_v_m_s": 110.39, "propellant_kg": 65.40},
+}
+OSCAR_OUTPUT_FILE = "output/dmf_output.json"  # inside each folder; read at run time, never copied
+# Solar series used by OSCAR (PyOscar.osg, daily: date, F10, F3M = 81-day mean, Ap). Our model
+# takes the monthly mean of F3M (calendar months), as F81mean for the strong cycle.
+# ECSS run checked (main.py): F3M vs our F81mean 2018-2032 mean difference -0.6 sfu, mean |diff|
+# 3.8 sfu (1.6 sfu if shifted by ~25 days: different 81-day alignment); Ap in OSCAR is a STEP of
+# the daily F10 (F10 < 100 -> 0, 100-199 -> 15, >= 200 -> 39), ours is continuous in F81 (0/15/45).
 
 # --- Simulation ---
 SIM_DURATION_YEARS = 15.0  # ASSUMPTION: reference mission horizon, to be reviewed
