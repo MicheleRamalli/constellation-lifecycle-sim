@@ -27,15 +27,23 @@ Figures:
                                     revisit vs latitude (real, ideal, reference Walker)
 - decay.png                       : Eaglet II orbital lifetime vs altitude; decay rate from
                                     the IRIDE TLEs vs the drag model
+- end_of_life.png                 : residual lifetime and collision probability (> 1 cm,
+                                    MASTER-8) of a failed satellite vs altitude
+- altitude_trade.png              : altitude trade-off 400-800 km: launch rate of the cheapest
+                                    strategy vs debris indicators (only with --trade)
 
 Second scenario: IRIDE Eaglet II, planes reconstructed from the derived TLE table
 (inputs/iride_eaglet2_elements.csv, written by fetch_tle.py; planes.py).
 
 Usage:
-    python main.py         fast mode (default): the check of T* with the extra seeds
-                           params.SEEDS_CHECK is skipped; every other result is identical
-    python main.py --full  also runs the T* check with the extra seeds (measured on the
-                           development laptop: ~7 min fast, ~11 min full)
+    python main.py          fast mode (default): the check of T* with the extra seeds
+                            params.SEEDS_CHECK is skipped and the altitude trade-off is not
+                            run; every other result is identical
+    python main.py --full   also runs the T* check with the extra seeds
+    python main.py --trade  also runs the altitude trade-off (altitude_trade.png)
+    Run time on the development laptop (2026-11-11): default ~8 min, --trade ~31 min.
+    --full adds ~4 min (measured before v0.3, not re-measured).
+    To follow the progress when the output goes to a file: python -u main.py > run.log
 """
 
 import argparse
@@ -49,14 +57,15 @@ from matplotlib.ticker import FormatStrFormatter, NullFormatter
 from scipy.integrate import quad
 
 import coverage
+import debris
 import decay
 import params
 import planes
 import tle
-from analytic import (reference_launch_rate, slot_availability_pre_order,
+from analytic import (binomial_interval, reference_launch_rate, slot_availability_pre_order,
                       slot_availability_renewal_reward)
-from lifecycle import (constellation_availability, constellation_revisit_series,
-                       simulate_constellation, simulate_fixed_cadence, simulate_plane,
+from lifecycle import (LAUNCH_FAILURE, RETIREMENT, constellation_availability,
+                       constellation_revisit_series, simulate_constellation, simulate_fixed_cadence, simulate_plane,
                        time_to_requirement)
 from reliability import reliability_analytic
 from search import bisect_interval, search_max_interval
@@ -145,10 +154,10 @@ def run_strategy(strategy, order_to_launch_days, n_runs=params.N_RUNS, seed=para
     return simulate_constellation(simulate_plane, inputs, seed)
 
 
-def run_cadence(k, interval_days, seed, n_runs):
+def run_cadence(k, interval_days, seed, n_runs, scenario=REFERENCE):
     """Strategy d) on every plane: k satellites every interval_days.
 
-    Plane p is deployed in one launch at PLANE_LAUNCH_S[p] carrying N_SLOTS + k
+    Plane p is deployed in one launch at plane_launch_s[p] carrying n_slots + k
     satellites: the k cadence satellites of that date fly with the deployment and
     act at once as spares (no operator would leave the plane without spares in
     the infant-mortality period; consistent with b). The cadence dates of plane p
@@ -157,14 +166,15 @@ def run_cadence(k, interval_days, seed, n_runs):
     """
     interval_s = interval_days * DAY_S
     inputs = []
-    for p, t_launch_s in enumerate(PLANE_LAUNCH_S):
+    n_slots = scenario["n_slots"]
+    for p, t_launch_s in enumerate(scenario["plane_launch_s"]):
         phase_s = p * interval_s / 2.0
         j_first = int(np.floor((t_launch_s - phase_s) / interval_s)) + 1
         inputs.append(dict(
-            n_slots=params.N_SLOTS, cadence_sats=k, cadence_interval_s=interval_s,
+            n_slots=n_slots, cadence_sats=k, cadence_interval_s=interval_s,
             cadence_start_s=phase_s + j_first * interval_s, n_runs=n_runs,
             sim_duration_s=params.SIM_DURATION_YEARS * YEAR_S, dt_s=params.DT_DAYS * DAY_S,
-            initial_launch_s=np.full(params.N_SLOTS + k, t_launch_s),
+            initial_launch_s=np.full(n_slots + k, t_launch_s),
             commissioning_s=params.COMMISSIONING_DAYS * DAY_S,
             design_life_s=params.DESIGN_LIFE_YEARS * YEAR_S,
             launch_success_prob=params.LAUNCH_SUCCESS_PROB, reliability=RELIABILITY))
@@ -304,31 +314,32 @@ def plot_availability_vs_order_time(sweeps, path):
 
 # Mission criterion, for each revisit requirement: at least AVAIL_CONFIDENCE of
 # the runs have availability >= AVAIL_TARGET.
-CADENCE_CACHE = {}  # {(k, seed, T_days): {req: fraction of runs meeting the criterion}}
+CADENCE_CACHE = {}  # {(scenario name, k, seed, T_days): {req: fraction of runs meeting the criterion}}
 
 
-def criterion_fractions(out):
+def criterion_fractions(out, scenario=REFERENCE):
     """Fraction of runs with availability >= AVAIL_TARGET, for each revisit requirement."""
-    return {req: np.mean(availability(out, req) >= params.AVAIL_TARGET) for req in REVISIT_REQS}
+    return {req: np.mean(availability(out, req, scenario) >= params.AVAIL_TARGET)
+            for req in REVISIT_REQS}
 
 
-def cadence_metrics(k, seed, t_days):
+def cadence_metrics(k, seed, t_days, scenario=REFERENCE):
     """Criterion fractions of strategy d) for (k, seed, T), N_RUNS_SWEEP runs (cached)."""
-    key = (k, seed, int(t_days))
+    key = (scenario["name"], k, seed, int(t_days))
     if key not in CADENCE_CACHE:
-        CADENCE_CACHE[key] = criterion_fractions(run_cadence(k, int(t_days), seed,
-                                                             params.N_RUNS_SWEEP))
+        CADENCE_CACHE[key] = criterion_fractions(
+            run_cadence(k, int(t_days), seed, params.N_RUNS_SWEEP, scenario), scenario)
     return CADENCE_CACHE[key]
 
 
-def cadence_search(k, seed, req, t_ref_days=None):
+def cadence_search(k, seed, req, t_ref_days=None, scenario=REFERENCE):
     """Largest interval T [days] per plane meeting the criterion for one revisit requirement.
 
     Coarse sweep + bisection (search.py); with t_ref_days (other seeds) a bisection
     between t_ref -/+ 2 grid steps after checking the bracket, else a full sweep.
     """
     def evaluate(t_days):
-        return cadence_metrics(k, seed, t_days)[req]
+        return cadence_metrics(k, seed, t_days, scenario)[req]
 
     start, stop, step = (np.array(params.CADENCE_GRID_DAYS_PER_SAT) * k).astype(int)
     if t_ref_days is not None:
@@ -338,14 +349,14 @@ def cadence_search(k, seed, req, t_ref_days=None):
     return search_max_interval(evaluate, np.arange(start, stop + 1, step), params.AVAIL_CONFIDENCE)
 
 
-def mc_launch_rate_per_year(out):
+def mc_launch_rate_per_year(out, scenario=REFERENCE):
     """Mean satellites launched per year by the constellation after deployment (MC) [1/yr]."""
-    after = out["t_s"] >= DEPLOY_END_S
-    years = (out["t_s"][-1] - DEPLOY_END_S) / YEAR_S
+    after = out["t_s"] >= scenario["deploy_end_s"]
+    years = (out["t_s"][-1] - scenario["deploy_end_s"]) / YEAR_S
     return out["n_launched"][:, after].sum(axis=1).mean() / years
 
 
-def steady_rate_pre_order(n_spares):
+def steady_rate_pre_order(n_spares, scenario=REFERENCE):
     """Steady-state launch rate of c) / b+c), one reorder per loss [satellites/yr].
 
     Each of the N + S units of a plane renews independently with mean cycle
@@ -356,31 +367,41 @@ def steady_rate_pre_order(n_spares):
     a_s = params.DESIGN_LIFE_YEARS * YEAR_S - order_s - params.COMMISSIONING_DAYS * DAY_S
     integral_s = YEAR_S * quad(lambda ty: reliability_analytic(ty * YEAR_S, **RELIABILITY),
                                0.0, a_s / YEAR_S, limit=200)[0]
-    return params.N_PLANES * (params.N_SLOTS + n_spares) / (order_s + integral_s) * YEAR_S
+    n_planes = len(scenario["plane_launch_s"])
+    return n_planes * (scenario["n_slots"] + n_spares) / (order_s + integral_s) * YEAR_S
 
 
-def failure_breakdown(out, req="max"):
+def failure_breakdown(out, req="max", scenario=REFERENCE):
     """Runs failing availability >= AVAIL_TARGET, by number of unplanned losses.
 
     Output: (fraction of runs failing [-], {number of losses: fraction of ALL runs [-]})
     """
-    failing = availability(out, req) < params.AVAIL_TARGET
+    failing = availability(out, req, scenario) < params.AVAIL_TARGET
     losses = out["n_failures"] + out["n_launch_failures"]
     counts = {int(n): np.sum(failing & (losses == n)) / len(failing)
               for n in np.unique(losses[failing])}
     return failing.mean(), counts
 
 
-def cost_study(full):
+def cost_study(full, scenario=REFERENCE, plot=True):
     """Search of T* for d) and comparison with c) and b+c), for both revisit requirements.
 
     full: if True, T* is also searched with the extra seeds params.SEEDS_CHECK
     (sensitivity check only: nothing else depends on it).
+    scenario: REFERENCE or an altitude scenario of the trade-off (altitude_scenario)
+    plot: save cost_vs_availability.png (reference scenario only)
+    Output: dict with "rows" (one per configuration: family, label, rate, fraction of
+    runs meeting the criterion per requirement and its binomial interval "<req>_ci"),
+    "outputs" ({label: constellation output}), "cheapest" ({req: cheapest row meeting
+    the criterion by point estimate, or None}) and "equivalent" ({req: rows not more
+    expensive than the cheapest whose interval contains AVAIL_CONFIDENCE; more than
+    one row = no single winner})
     """
-    ref_rate = params.N_PLANES * reference_launch_rate(
-        params.N_SLOTS, RELIABILITY, params.DESIGN_LIFE_YEARS * YEAR_S,
+    n_planes, n_slots = len(scenario["plane_launch_s"]), scenario["n_slots"]
+    ref_rate = n_planes * reference_launch_rate(
+        n_slots, RELIABILITY, params.DESIGN_LIFE_YEARS * YEAR_S,
         params.COMMISSIONING_DAYS * DAY_S) * YEAR_S
-    print(f"Reference rate P N / E[up] = {ref_rate:.3f} satellites/yr "
+    print(f"{scenario['name']}: reference rate P N / E[up] = {ref_rate:.3f} satellites/yr "
           "(every satellite gives its whole useful life, no gaps)")
     print(f"Mission criterion: {params.AVAIL_CONFIDENCE:.0%} of the runs with availability "
           f">= {params.AVAIL_TARGET}")
@@ -389,7 +410,7 @@ def cost_study(full):
     for req, spec in REVISIT_REQS.items():
         print(f"Requirement '{spec['text']}':")
         for k in params.CADENCE_SATS_OPTIONS:
-            result = cadence_search(k, params.SEED, req)
+            result = cadence_search(k, params.SEED, req, scenario=scenario)
             t_star = result["t_star_days"]
             if np.isnan(t_star):
                 print(f"  d) k = {k}: no interval of the grid meets the criterion")
@@ -397,22 +418,23 @@ def cost_study(full):
             if not result.get("bracketed", True):
                 print(f"  d) k = {k}: every interval of the grid meets it (T* >= {t_star} d)")
             if full:
-                checks = [cadence_search(k, seed, req, t_ref_days=t_star)["t_star_days"]
+                checks = [cadence_search(k, seed, req, t_ref_days=t_star, scenario=scenario)["t_star_days"]
                           for seed in params.SEEDS_CHECK]
                 check_text = f"seeds {params.SEEDS_CHECK}: {checks}"
             else:
                 check_text = "seed check skipped, run with --full"
             d_best[req][k] = t_star
             print(f"  d) k = {k}: T* = {t_star} d ({check_text}) -> "
-                  f"{params.N_PLANES * k * 365.25 / t_star:.3f} satellites/yr; "
+                  f"{n_planes * k * 365.25 / t_star:.3f} satellites/yr; "
                   f"non monotone: {result.get('non_monotone')}")
 
     d_curves = {}
     for k in params.CADENCE_SATS_OPTIONS:
-        t_grid = np.array(sorted(t for (kk, seed, t) in CADENCE_CACHE
-                                 if kk == k and seed == params.SEED))
-        d_curves[k] = {"rate": params.N_PLANES * k * 365.25 / t_grid,
-                       **{req: np.array([CADENCE_CACHE[(k, params.SEED, t)][req] for t in t_grid])
+        t_grid = np.array(sorted(t for (name, kk, seed, t) in CADENCE_CACHE
+                                 if name == scenario["name"] and kk == k and seed == params.SEED))
+        d_curves[k] = {"rate": n_planes * k * 365.25 / t_grid,
+                       **{req: np.array([CADENCE_CACHE[(scenario["name"], k, params.SEED, t)][req]
+                                         for t in t_grid])
                           for req in REVISIT_REQS}}
 
     configs = []
@@ -424,29 +446,35 @@ def cost_study(full):
         configs.append(("c" if n_spares == 0 else "b+c", n_spares, None))
 
     print(f"{'Configuration':26s} {'sats/yr steady':>14s} {'sats/yr MC':>10s} "
-          f"{'avail max<=12h (5-95 %) | runs ok':>36s} {'avail mean<=6h (5-95 %) | runs ok':>36s}")
+          f"{'avail max<=12h (5-95 %) | runs ok [binomial interval]':>52s} "
+          f"{'avail mean<=6h (5-95 %) | runs ok [binomial interval]':>52s}")
     rows, outputs = [], {}
     for family, value, t_star in configs:
         if family == "d":
-            out = run_cadence(value, t_star, params.SEED, params.N_RUNS)
-            rate = params.N_PLANES * value * 365.25 / t_star
+            out = run_cadence(value, t_star, params.SEED, params.N_RUNS, scenario)
+            rate = n_planes * value * 365.25 / t_star
             label = f"d) k={value}, T={t_star} d"
         else:
             strategy = dict(n_spares=value, reorder_level=value, pre_order_retirement=True)
-            out = run_strategy(strategy, params.ORDER_TO_LAUNCH_DAYS)
-            rate = steady_rate_pre_order(value)
+            out = run_strategy(strategy, params.ORDER_TO_LAUNCH_DAYS, scenario=scenario)
+            rate = steady_rate_pre_order(value, scenario)
             label = "c) early ordering" if value == 0 else f"b+c) S={value} per plane"
         outputs[label] = out
-        fractions = criterion_fractions(out)
-        rows.append({"family": family, "label": label, "rate": rate, **fractions})
+        row = {"family": family, "label": label, "rate": rate}
         text = []
         for req in REVISIT_REQS:
-            avail = availability(out, req)
+            avail = availability(out, req, scenario)
+            n_ok = int(np.sum(avail >= params.AVAIL_TARGET))
+            row[req] = n_ok / len(avail)
+            row[req + "_ci"] = binomial_interval(n_ok, len(avail), params.MC_CI_LEVEL)
             p5, p95 = np.percentile(avail, [5, 95])
-            text.append(f"{avail.mean():.4f} ({p5:.3f}-{p95:.3f}) | {fractions[req]:.3f}")
-        print(f"{label:26s} {rate:14.3f} {mc_launch_rate_per_year(out):10.3f}   "
-              f"{text[0]:>34s}   {text[1]:>34s}")
+            text.append(f"{avail.mean():.4f} ({p5:.3f}-{p95:.3f}) | {row[req]:.3f} "
+                        f"[{row[req + '_ci'][0]:.3f}, {row[req + '_ci'][1]:.3f}]")
+        rows.append(row)
+        print(f"{label:26s} {rate:14.3f} {mc_launch_rate_per_year(out, scenario):10.3f}   "
+              f"{text[0]:>50s}   {text[1]:>50s}")
 
+    cheapest, equivalent = {}, {}
     for req, spec in REVISIT_REQS.items():
         print(f"Cheapest configuration per family, requirement '{spec['text']}':")
         for family in ["d", "c", "b+c"]:
@@ -456,14 +484,42 @@ def cost_study(full):
                 print(f"  {family:4s}: {best['label']} -> {best['rate']:.3f} satellites/yr")
             else:
                 print(f"  {family:4s}: none of the configurations tested meets it")
+        ok = [r for r in rows if r[req] >= params.AVAIL_CONFIDENCE]
+        cheapest[req] = min(ok, key=lambda r: r["rate"]) if ok else None
+        equivalent[req] = equivalent_rows(rows, cheapest[req], req)
+        if len(equivalent[req]) > 1:
+            print(f"  NO SINGLE WINNER: the {params.MC_CI_LEVEL:.0%} binomial interval of these "
+                  f"configurations contains the criterion {params.AVAIL_CONFIDENCE}; they are "
+                  "statistically equivalent to the requirement with this number of runs:")
+            for r in equivalent[req]:
+                print(f"    {r['label']}: {r['rate']:.3f} satellites/yr, runs ok {r[req]:.3f} "
+                      f"[{r[req + '_ci'][0]:.3f}, {r[req + '_ci'][1]:.3f}]")
 
-    failing, counts = failure_breakdown(outputs["c) early ordering"])
+    failing, counts = failure_breakdown(outputs["c) early ordering"], scenario=scenario)
     print(f"c) alone, requirement 'max': {failing:.3f} of the runs have availability < "
           f"{params.AVAIL_TARGET}; by number of unplanned losses in the run: "
           + ", ".join(f"{n}: {f:.3f}" for n, f in counts.items()))
 
-    plot_cost_vs_availability(d_curves, d_best, rows, ref_rate,
-                              os.path.join(FIG_DIR, "cost_vs_availability.png"))
+    if plot:
+        plot_cost_vs_availability(d_curves, d_best, rows, ref_rate,
+                                  os.path.join(FIG_DIR, "cost_vs_availability.png"))
+    return {"rows": rows, "outputs": outputs, "cheapest": cheapest, "equivalent": equivalent}
+
+
+def equivalent_rows(rows, best, req):
+    """Configurations that cannot be told apart from the criterion, up to the cost of best.
+
+    A fraction of runs measured with n runs has a binomial interval (row[req + "_ci"]).
+    If the interval contains AVAIL_CONFIDENCE, the Monte Carlo cannot say whether the
+    configuration meets the criterion. Output: rows with such an interval and a launch
+    rate <= that of best (the cheapest by point estimate), sorted by rate; best itself
+    is included when its own interval contains the criterion. Empty if best is None.
+    """
+    if best is None:
+        return []
+    near = [r for r in rows if r["rate"] <= best["rate"]
+            and r[req + "_ci"][0] < params.AVAIL_CONFIDENCE <= r[req + "_ci"][1]]
+    return sorted(near, key=lambda r: r["rate"])
 
 
 def plot_cost_vs_availability(d_curves, d_best, rows, ref_rate, path):
@@ -832,11 +888,350 @@ def plot_decay(tables, b, alt_sat_m, observed, path):
     plt.close(fig)
 
 
+# ---------------------------------------------------------------------------
+# Debris indicators (v0.3): end of life, 5-year rule, object-years, collisions
+# ---------------------------------------------------------------------------
+
+def eaglet_area():
+    """Mean cross-section of Eaglet II [m^2] (box surface / 4, params.py ASSUMPTION)."""
+    return decay.box_mean_area(*params.EAGLET_BOX_M)
+
+
+def end_of_life_tables(alt_op_m, model=params.ATM_MODEL, area_factor=1.0):
+    """Residual lifetime and collision probability of each object class.
+
+    Inputs: operational altitude [m], atmosphere model, area factor [-]
+    Output: dict {level: {"residual_s": {outcome: lifetime [s]},
+                          "pc": {outcome: {flux case: P_c [-]}}}}
+    """
+    atm_alt_m, rho = decay.read_density_table(params.ATM_DENSITY_CSV, model)
+    flux_alt_m, flux = debris.read_master_flux(params.MASTER_FLUX_CSV, params.FLUX_SIZE, YEAR_S)
+    area_m2 = eaglet_area() * area_factor
+    b = eaglet_ballistic_coefficient() * area_factor
+    end_m = params.DECAY_END_ALT_KM * 1e3
+    start_m = {debris.FAILED: alt_op_m, debris.DISPOSAL_FAILED: alt_op_m,
+               debris.DISPOSED: params.DISPOSAL_ALT_KM * 1e3}
+    tables = {}
+    for level in params.SOLAR_ACTIVITY_LEVELS:
+        residual, pc = {}, {}
+        for outcome, h0 in start_m.items():
+            residual[outcome] = decay.lifetime(h0, end_m, atm_alt_m, rho[level], b)
+            pc[outcome] = {case: debris.collision_probability(debris.flux_time_integral(
+                h0, end_m, atm_alt_m, rho[level], b, flux_alt_m, flux[case]), area_m2)
+                for case in debris.FLUX_CASES}
+        tables[level] = {"residual_s": residual, "pc": pc}
+    return tables
+
+
+def operational_pc(alt_op_m):
+    """P_c of one satellite over its design life at constant altitude, per flux case [-]."""
+    flux_alt_m, flux = debris.read_master_flux(params.MASTER_FLUX_CSV, params.FLUX_SIZE, YEAR_S)
+    t_s = params.DESIGN_LIFE_YEARS * YEAR_S
+    return {case: debris.collision_probability(debris.flux_at(alt_op_m, flux_alt_m, flux[case]) * t_s,
+                                               eaglet_area()) for case in debris.FLUX_CASES}
+
+
+def debris_indicators(out, tables, p_manoeuvre):
+    """Monte Carlo debris indicators of one constellation output, per solar activity level.
+
+    The disposal draws use the seed sequence [SEED, DEBRIS_SEED_STREAM], the same
+    for every level (common random numbers: the levels differ only by physics).
+    Output: {level: debris.debris_summary dict + "collisions" (sum of P_c of the
+    dead objects of each run, nominal flux) and "obj_years_operational"}
+    """
+    limit_s = params.LEO_LIFETIME_LIMIT_YEARS * YEAR_S
+    horizon_s = out["t_s"][-1]
+    dt_s = out["t_s"][1] - out["t_s"][0]
+    live = out["n_active"].sum(axis=0) + out.get("n_spares_in_orbit", 0)
+    result = {}
+    for level, tab in tables.items():
+        rng = np.random.default_rng([params.SEED, params.DEBRIS_SEED_STREAM])
+        pc = {outcome: tab["pc"][outcome]["nominal"] for outcome in tab["pc"]}
+        s = debris.debris_summary(out, p_manoeuvre, rng, tab["residual_s"], horizon_s, limit_s, pc)
+        s["obj_years_operational"] = live.sum(axis=1) * dt_s / YEAR_S
+        result[level] = s
+    return result
+
+
+def mean_5_95(x):
+    """'mean (p5-p95)' of an array, ignoring nan."""
+    x = x[~np.isnan(x)]
+    return f"{x.mean():.3f} ({np.percentile(x, 5):.3f}-{np.percentile(x, 95):.3f})"
+
+
+def debris_study(cost):
+    """End of life, 5-year rule, object-years and collision probability at the reference altitude.
+
+    cost: output of cost_study; the lifecycle Monte Carlo of the cheapest configuration
+    meeting the max-revisit criterion gives the mix and timing of the dead objects.
+    """
+    alt_m = params.ALT_KM * 1e3
+    limit_yr = params.LEO_LIFETIME_LIMIT_YEARS
+    names = {debris.FAILED: "failed (natural decay)", debris.DISPOSAL_FAILED: "disposal failed",
+             debris.DISPOSED: f"disposed ({params.DISPOSAL_ALT_KM:.0f} km)"}
+    print(f"Residual lifetime after end of life [yr] from {params.ALT_KM:.0f} km, limit {limit_yr:.0f} yr "
+          "(ESSB 5.4.2.3a.1), compliant = <= limit:")
+    tables = {}
+    for model in (params.ATM_MODEL, params.ATM_MODEL_SENSITIVITY):
+        tables[model] = end_of_life_tables(alt_m, model)
+        for outcome in (debris.FAILED, debris.DISPOSED):
+            text = []
+            for level in params.SOLAR_ACTIVITY_LEVELS:
+                t_yr = tables[model][level]["residual_s"][outcome] / YEAR_S
+                text.append(f"{level} {t_yr:7.2f} {'OK' if t_yr <= limit_yr else 'NOT compliant'}")
+            print(f"  {model:8s} {names[outcome]:24s}: " + " | ".join(text))
+    for f in params.EAGLET_AREA_FACTORS:
+        tab = end_of_life_tables(alt_m, params.ATM_MODEL, f)
+        print(f"  area x {f}: failed " + " / ".join(
+            f"{tab[lv]['residual_s'][debris.FAILED] / YEAR_S:.2f}" for lv in params.SOLAR_ACTIVITY_LEVELS)
+            + f" yr; disposed " + " / ".join(
+            f"{tab[lv]['residual_s'][debris.DISPOSED] / YEAR_S:.2f}" for lv in params.SOLAR_ACTIVITY_LEVELS)
+            + " yr (low / moderate / high)")
+
+    ref = tables[params.ATM_MODEL]
+    print(f"Collision probability with objects > 1 cm (MASTER-8), one object, low / nominal / high "
+          f"flux, limit {params.CUM_COLLISION_PROB_LIMIT:.0e} (ESSB 5.4.2.3a.2), A = {eaglet_area():.3f} m^2:")
+    for outcome in (debris.FAILED, debris.DISPOSED):
+        for level in params.SOLAR_ACTIVITY_LEVELS:
+            pc = ref[level]["pc"][outcome]
+            print(f"  {names[outcome]:24s} {level:8s}: "
+                  + " / ".join(f"{pc[c]:.2e}" for c in debris.FLUX_CASES))
+    op = operational_pc(alt_m)
+    print(f"  operational phase ({params.DESIGN_LIFE_YEARS:.0f} yr at {params.ALT_KM:.0f} km, reported "
+          "apart): " + " / ".join(f"{op[c]:.2e}" for c in debris.FLUX_CASES))
+
+    r_dl = reliability_analytic(params.DESIGN_LIFE_YEARS * YEAR_S, **RELIABILITY)
+    p_star = debris.required_manoeuvre_prob(params.DISPOSAL_PROB_REF, r_dl)
+    print(f"Fraction of satellites reaching retirement R(DL) = {r_dl:.4f}: effective P_d = "
+          f"p_manoeuvre x {r_dl:.4f}; P_d,eff = {params.DISPOSAL_PROB_REF} needs p_manoeuvre >= {p_star:.4f}")
+
+    label = cost["cheapest"]["max"]["label"]
+    out = cost["outputs"][label]
+    ends = out["end_kind"] != LAUNCH_FAILURE
+    f_ret_mc = np.mean(out["end_kind"][ends] == RETIREMENT)
+    others = [r["label"] for r in cost["equivalent"]["max"] if r["label"] != label]
+    if others:
+        print(f"  NOTE: {label} is not a single winner (statistically equivalent to the requirement: "
+              f"{', '.join(others)}); it is used here as the cheapest by point estimate")
+    print(f"Monte Carlo: {label} (cheapest meeting the max-revisit criterion), {out['n_active'].shape[1]} "
+          f"runs, {params.SIM_DURATION_YEARS:.0f} yr; retirements / ends in orbit = {f_ret_mc:.4f} "
+          "(ends inside the horizon only)")
+    print(f"  {'p_manoeuvre':>11s} {'P_d,eff':>7s}  fraction of objects compliant, mean (5-95 %) per run: "
+          + "  ".join(f"{lv:>22s}" for lv in params.SOLAR_ACTIVITY_LEVELS))
+    sweep = {}
+    for p_m in params.DISPOSAL_PROB_SWEEP:
+        ind = debris_indicators(out, ref, p_m)
+        sweep[p_m] = ind
+        lv0 = params.SOLAR_ACTIVITY_LEVELS[0]
+        pd_eff = ind[lv0]["n_disposed"].sum() / ind[lv0]["n_objects"].sum()
+        print(f"  {p_m:11.2f} {pd_eff:7.3f}  " + "  ".join(
+            f"{mean_5_95(ind[lv]['frac_compliant']):>22s}" for lv in params.SOLAR_ACTIVITY_LEVELS))
+    ind = sweep[params.DISPOSAL_PROB_REF]
+    lv0 = params.SOLAR_ACTIVITY_LEVELS[0]
+    print(f"  p_manoeuvre = {params.DISPOSAL_PROB_REF}: dead objects per run {mean_5_95(ind[lv0]['n_objects'].astype(float))}; "
+          f"operational object-years {mean_5_95(ind[lv0]['obj_years_operational'])}")
+    for lv in params.SOLAR_ACTIVITY_LEVELS:
+        print(f"  {lv:8s}: dead object-years committed {mean_5_95(ind[lv]['obj_years_committed'] / YEAR_S)}, "
+              f"inside the horizon {mean_5_95(ind[lv]['obj_years_horizon'] / YEAR_S)}; expected "
+              f"collisions > 1 cm of the dead objects {ind[lv]['collisions'].mean():.2e}")
+    plot_end_of_life(os.path.join(FIG_DIR, "end_of_life.png"))
+    return sweep
+
+
+def plot_end_of_life(path):
+    """(a) residual lifetime vs altitude; (b) collision probability vs altitude (natural decay)."""
+    alt_grid_m = np.arange(300e3, 801e3, 25e3)
+    curves = [end_of_life_tables(h) for h in alt_grid_m]
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    for level, color in zip(params.SOLAR_ACTIVITY_LEVELS, ["tab:blue", "tab:orange", "tab:red"]):
+        life = [c[level]["residual_s"][debris.FAILED] / YEAR_S for c in curves]
+        ax1.semilogy(alt_grid_m / 1e3, life, color=color, label=f"{level} activity")
+        pc = {case: np.array([c[level]["pc"][debris.FAILED][case] for c in curves])
+              for case in debris.FLUX_CASES}
+        ax2.semilogy(alt_grid_m / 1e3, pc["nominal"], color=color, label=f"{level} activity")
+        ax2.fill_between(alt_grid_m / 1e3, pc["low"], pc["high"], color=color, alpha=0.2)
+    ax1.axhline(params.LEO_LIFETIME_LIMIT_YEARS, color="k", linestyle="--", label="ESSB 5-yr limit")
+    ax1.axvline(params.DISPOSAL_ALT_KM, color="gray", linestyle=":", label="disposal orbit")
+    ax1.axvline(params.ALT_KM, color="gray", linestyle="-.", label="reference altitude")
+    ax1.set_xlabel("Initial altitude [km]")
+    ax1.set_ylabel(f"Residual lifetime to {params.DECAY_END_ALT_KM:.0f} km [yr]")
+    ax1.set_title("(a) Natural decay, Eaglet II, NRLMSISE-00 (ECSS)")
+    ax2.axhline(params.CUM_COLLISION_PROB_LIMIT, color="k", linestyle="--", label="ESSB limit 1e-3")
+    ax2.axvline(params.ALT_KM, color="gray", linestyle="-.")
+    ax2.set_xlabel("Initial altitude [km]")
+    ax2.set_ylabel("Cumulative collision probability, objects > 1 cm [-]")
+    ax2.set_title("(b) MASTER-8 flux, band = low-high (1 sigma)")
+    for ax in (ax1, ax2):
+        ax.grid(True, which="both", alpha=0.3)
+        ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Altitude trade-off (v0.3): launch rate vs debris indicators
+# ---------------------------------------------------------------------------
+
+def altitude_coverage(alt_km):
+    """Smallest Walker and its revisit lookup table at one altitude (cached in data/).
+
+    Same requirement, sensor and numerics as the reference (coverage.py); circular
+    SSO at alt_km. Output: dict with "walker" (P, S, F) and "table_max_s", "table_mean_s"
+    """
+    path = os.path.join("data", f"coverage_alt{alt_km:.0f}.npz")
+    key = np.append(coverage.coverage_key(), alt_km)
+    if os.path.exists(path):
+        cached = dict(np.load(path))
+        if cached["key"].shape == key.shape and np.allclose(cached["key"], key):
+            return cached
+    step_s, duration_s = params.COV_STEP_S, params.COV_DURATION_DAYS * DAY_S
+    eta, spread = np.radians(params.ETA_MAX_DEG), np.radians(params.RAAN_SPREAD_DEG)
+    walker, _ = coverage.walker_search(eta, step_s, duration_s, params.WALKER_P_RANGE,
+                                       params.WALKER_S_RANGE, spread, a_m=coverage.R_E + alt_km * 1e3)
+    if walker is None:
+        raise RuntimeError(f"No Walker of the search range meets the requirement at {alt_km} km")
+    max_s, mean_s = coverage.revisit_table_planes(*walker, eta, step_s, duration_s, spread,
+                                                  alt_m=alt_km * 1e3)
+    data = {"key": key, "walker": np.array(walker), "table_max_s": max_s, "table_mean_s": mean_s}
+    os.makedirs("data", exist_ok=True)
+    np.savez(path, **data)
+    return data
+
+
+def altitude_scenario(alt_km):
+    """Simulation scenario (as REFERENCE) of the smallest Walker at one altitude."""
+    cov = altitude_coverage(alt_km)
+    n_planes, n_slots, phasing = (int(x) for x in cov["walker"])
+    plane_launch_s = np.arange(n_planes) * params.DEPLOY_INTERVAL_DAYS * DAY_S  # D1
+    tables = {"max": cov["table_max_s"], "mean": cov["table_mean_s"]}
+    return {"name": f"Walker {n_planes}/{n_slots}/{phasing} at {alt_km:.0f} km",
+            "n_slots": n_slots, "plane_launch_s": plane_launch_s,
+            "deploy_end_s": plane_launch_s[-1] + params.COMMISSIONING_DAYS * DAY_S,
+            "tables": lambda: tables}
+
+
+def altitude_trade(cost_ref):
+    """For each altitude: smallest Walker, cheapest strategy, debris indicators.
+
+    cost_ref: cost_study output of the reference scenario, reused at ALT_KM when the
+    Walker search there gives the reference Walker (same runs, same numbers).
+    ASSUMPTIONs: station-keeping propellant not modelled (relevant mainly at 400-450 km);
+    reliability and design life independent of the altitude; disposal manoeuvre success
+    DISPOSAL_PROB_REF at every altitude.
+    """
+    rows = []
+    for alt_km in params.ALT_TRADE_KM:
+        scenario = altitude_scenario(alt_km)
+        walker = altitude_coverage(alt_km)["walker"]
+        is_ref = (alt_km == params.ALT_KM and
+                  (walker[0], walker[1]) == (params.N_PLANES, params.N_SLOTS))
+        print(f"--- {scenario['name']}" + (" (reference runs reused)" if is_ref else ""))
+        cost = cost_ref if is_ref else cost_study(False, scenario, plot=False)
+        best = cost["cheapest"]["max"]
+        if best is None:
+            print("  no configuration meets the max-revisit criterion")
+            continue
+        out = cost["outputs"][best["label"]]
+        tables = end_of_life_tables(alt_km * 1e3)
+        ind = debris_indicators(out, tables, params.DISPOSAL_PROB_REF)
+        row = {"alt_km": alt_km, "walker": tuple(int(x) for x in walker), "label": best["label"],
+               "rate": best["rate"], "n_sats": int(walker[0] * walker[1]),
+               "equivalent": [(r["label"], r["rate"]) for r in cost["equivalent"]["max"]
+                              if r["label"] != best["label"]]}
+        for lv in params.SOLAR_ACTIVITY_LEVELS:
+            row[f"life_failed_{lv}"] = tables[lv]["residual_s"][debris.FAILED] / YEAR_S
+            row[f"pc_failed_{lv}"] = {c: tables[lv]["pc"][debris.FAILED][c] for c in debris.FLUX_CASES}
+            row[f"compliant_{lv}"] = np.nanmean(ind[lv]["frac_compliant"])
+            row[f"objyr_{lv}"] = ind[lv]["obj_years_committed"].mean() / YEAR_S
+            row[f"collisions_{lv}"] = ind[lv]["collisions"].mean()
+        row["pc_operational"] = operational_pc(alt_km * 1e3)
+        rows.append(row)
+
+    print(f"Altitude trade-off, max-revisit requirement, p_manoeuvre = {params.DISPOSAL_PROB_REF}, "
+          f"{params.ATM_MODEL} (low / moderate / high activity), nominal MASTER flux:")
+    print(f"{'h [km]':>6s} {'Walker':>8s} {'cheapest':>22s} {'sats/yr':>7s} "
+          f"{'failed lifetime [yr]':>24s} {'objects compliant':>20s} {'dead obj-yr/run':>22s} "
+          f"{'P_c failed object':>28s}")
+    for r in rows:
+        lv = params.SOLAR_ACTIVITY_LEVELS
+        print(f"{r['alt_km']:6.0f} {'/'.join(map(str, r['walker'])):>8s} {r['label']:>22s} "
+              f"{r['rate']:7.3f} " + " / ".join(f"{r[f'life_failed_{l}']:6.1f}" for l in lv) + "  "
+              + " / ".join(f"{r[f'compliant_{l}']:.2f}" for l in lv) + "  "
+              + " / ".join(f"{r[f'objyr_{l}']:6.1f}" for l in lv) + "  "
+              + " / ".join(f"{r[f'pc_failed_{l}']['nominal']:.1e}" for l in lv))
+        for label, rate in r["equivalent"]:
+            print(f"{'':15s} no single winner: {label} ({rate:.3f} sats/yr) is statistically "
+                  "equivalent to the requirement")
+    plot_altitude_trade(rows, os.path.join(FIG_DIR, "altitude_trade.png"))
+    return rows
+
+
+def short_label(label):
+    """Configuration label without the words that do not fit in a figure annotation."""
+    return label.replace(" per plane", "").replace(" early ordering", "")
+
+
+def plot_altitude_trade(rows, path):
+    """Launch rate, failed-object lifetime, dead object-years and P_c vs altitude."""
+    alt = np.array([r["alt_km"] for r in rows])
+    levels = params.SOLAR_ACTIVITY_LEVELS
+    colors = ["tab:blue", "tab:orange", "tab:red"]
+    fig, axes = plt.subplots(2, 2, figsize=(12, 9))
+    ax = axes[0, 0]
+    ax.plot(alt, [r["rate"] for r in rows], "ko-", label="cheapest meeting the criterion (point estimate)")
+    tie_label = f"equivalent to the requirement ({params.MC_CI_LEVEL:.0%} binomial interval)"
+    for r in rows:
+        ax.annotate(f"Walker {'/'.join(map(str, r['walker']))}\n{short_label(r['label'])}",
+                    (r["alt_km"], r["rate"]), textcoords="offset points", xytext=(0, 8),
+                    ha="center", fontsize=7)
+        for label, rate in r["equivalent"]:  # no single winner at this altitude
+            ax.plot(r["alt_km"], rate, "o", mfc="none", color="k", label=tie_label)
+            ax.annotate(short_label(label), (r["alt_km"], rate), textcoords="offset points",
+                        xytext=(0, -12), ha="center", fontsize=7)
+            tie_label = None  # one legend entry only
+    ax.margins(x=0.12, y=0.2)  # room for the text above and below the points
+    ax.legend(fontsize=7, loc="upper right")
+    ax.set_ylabel("Launch rate [satellites/yr]")
+    ax.set_title("(a) Smallest Walker and cheapest strategy (max revisit)")
+    ax = axes[0, 1]
+    for lv, c in zip(levels, colors):
+        ax.semilogy(alt, [r[f"life_failed_{lv}"] for r in rows], "o-", color=c, label=f"{lv} activity")
+    ax.axhline(params.LEO_LIFETIME_LIMIT_YEARS, color="k", linestyle="--", label="ESSB 5-yr limit")
+    ax.set_ylabel("Residual lifetime of a failed satellite [yr]")
+    ax.set_title("(b) Natural decay from the operational altitude")
+    ax = axes[1, 0]
+    for lv, c in zip(levels, colors):
+        ax.semilogy(alt, [r[f"objyr_{lv}"] for r in rows], "o-", color=c, label=f"{lv} activity")
+    ax.set_ylabel("Dead object-years per run (committed)")
+    ax.set_title(f"(c) Objects left in {params.SIM_DURATION_YEARS:.0f} yr, p_manoeuvre = "
+                 f"{params.DISPOSAL_PROB_REF}")
+    ax = axes[1, 1]
+    for lv, c in zip(levels, colors):
+        pc = {k: np.array([r[f"pc_failed_{lv}"][k] for r in rows]) for k in debris.FLUX_CASES}
+        ax.semilogy(alt, pc["nominal"], "o-", color=c, label=f"{lv} activity")
+        ax.fill_between(alt, pc["low"], pc["high"], color=c, alpha=0.2)
+    ax.axhline(params.CUM_COLLISION_PROB_LIMIT, color="k", linestyle="--", label="ESSB limit 1e-3")
+    ax.set_ylabel("Collision probability of a failed satellite, > 1 cm [-]")
+    ax.set_title("(d) MASTER-8, band = low-high flux")
+    for ax in axes.ravel():
+        ax.set_xlabel("Operational altitude [km]")
+        ax.grid(True, which="both", alpha=0.3)
+        if ax is not axes[0, 0]:
+            ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Constellation lifecycle simulator, nominal case")
     parser.add_argument("--full", action="store_true",
                         help="also check T* of strategy d) with the extra seeds (slower)")
-    full = parser.parse_args().full
+    parser.add_argument("--trade", action="store_true",
+                        help="also run the altitude trade-off (slower)")
+    args = parser.parse_args()
+    full = args.full
     print("Mode: full" if full else "Mode: fast (use --full for the T* seed check)")
     os.makedirs(FIG_DIR, exist_ok=True)
 
@@ -856,13 +1251,22 @@ def main():
     plot_availability_vs_order_time(sweeps, os.path.join(FIG_DIR, "availability_vs_order_time.png"))
 
     print("Fixed cadence d), search of the minimum cadence, cost comparison")
-    cost_study(full)
+    cost = cost_study(full)
 
     print("Second scenario: IRIDE Eaglet II from public TLEs")
     iride_study()
 
     print("Orbital decay (v0.3)")
     decay_study()
+
+    print("End of life and debris indicators (v0.3)")
+    debris_study(cost)
+
+    if args.trade:
+        print("Altitude trade-off (v0.3): launch rate vs debris indicators")
+        altitude_trade(cost)
+    else:
+        print("Altitude trade-off skipped, run with --trade (altitude_trade.png not updated)")
     print(f"Figures saved in {FIG_DIR}/")
 
 

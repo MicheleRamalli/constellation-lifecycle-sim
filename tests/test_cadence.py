@@ -1,9 +1,11 @@
 """Validation of lifecycle.simulate_fixed_cadence (strategy d) against exact results.
 
 With a fixed cadence no satellite is ever reordered, and every satellite is
-independent (H1, H2: same R(t) and design life from launch, active or spare).
-At any time t the usable satellites are U(t) = sum over cohorts of
-Binomial(k_j, p_launch R(t - t_j)) for the cohorts with C <= t - t_j < DL, and
+fails independently (H1, H2: same R(t) and design life from launch, active or
+spare); each launch has one success draw for all its satellites. At any time t
+the usable satellites are U(t) = sum over launches of a mixture: 0 with prob.
+1 - p_launch, Binomial(k_j, R(t - t_j)) with prob. p_launch, for the launches
+with C <= t - t_j < DL, and
 the operational satellites are min(N, U(t)) (spares fill every slot, H4).
 analytic.usable_distribution_cadence computes this exactly.
 
@@ -54,10 +56,14 @@ def out():
 
 
 def cohorts():
-    """Launch dates and sizes of all cohorts: initial deployment + cadence."""
+    """Launch dates and sizes of all launches: initial deployment + cadence.
+
+    The deployment units with the same launch time fly on one launch (batch).
+    """
+    t_batch_s, batch_counts = np.unique(INITIAL_S, return_counts=True)
     t_cadence_s = cadence_launch_times(START_S, INTERVAL_S, DURATION_S)
-    times_s = np.concatenate([INITIAL_S, t_cadence_s])
-    counts = np.concatenate([np.ones(len(INITIAL_S), dtype=int), np.full(len(t_cadence_s), K)])
+    times_s = np.concatenate([t_batch_s, t_cadence_s])
+    counts = np.concatenate([batch_counts, np.full(len(t_cadence_s), K)])
     return times_s, counts
 
 

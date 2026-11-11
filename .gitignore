@@ -21,3 +21,6 @@ data/
 
 # Raw TLE files from CelesTrak (not redistributed; the derived CSV in inputs/ is tracked)
 inputs/tle/
+
+# Raw GCAT launch list (J. McDowell); counts are copied into params.py
+inputs/launch_log/

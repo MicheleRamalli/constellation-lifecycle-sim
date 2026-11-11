@@ -53,7 +53,21 @@ DEPLOY_INTERVAL_DAYS = 180.0 # ASSUMPTION: constant interval, rounded from the E
 # --- Replacement strategy: launch on failure ---
 ORDER_TO_LAUNCH_DAYS = 365.0  # ASSUMPTION: provisional reference value, time from replacement order to launch (no source yet)
 COMMISSIONING_DAYS = 30.0     # ASSUMPTION: provisional reference value, time from launch to operational (no source yet)
-LAUNCH_SUCCESS_PROB = 1.0     # ASSUMPTION: launch failures neglected in v0.1
+# Launch success (v0.3): one draw per launch, a failed launch loses all its satellites.
+# Source: J. McDowell, GCAT launch list, https://planet4589.org/space/gcat/tsv/launch/launch.tsv,
+# downloaded 2026-11-09 (file "Updated 2026 Nov 9"; last Falcon 9 entry 2026-11-07); counts by
+# launch_log.py. Falcon 9 Block 5 = GCAT Variant "FT5" (first entry 2018-05-11, booster B1046,
+# the first Block 5). Orbital + deep-space launches only (the suborbital Dragon in-flight
+# abort is excluded). The only failure is Starlink Group 9-3 (2024-07-12, code OF40, payload
+# re-entered): counted as a failure. Estimator: Jeffreys, posterior mean (k + 1/2)/(n + 1).
+LAUNCH_LOG_RAW = "inputs/launch_log/gcat_launch_2026-11-09.tsv"  # raw, NOT in git
+LAUNCH_LV_TYPE = "Falcon 9"
+LAUNCH_VARIANT = "FT5"
+LAUNCH_N = 644            # Falcon 9 Block 5 launches, 2018-05-11 to 2026-11-07
+LAUNCH_N_FAIL = 1
+LAUNCH_N_TRANSPORTER = 18       # Transporter-1 to -18 (subset, reported only)
+LAUNCH_N_FAIL_TRANSPORTER = 0
+LAUNCH_SUCCESS_PROB = (LAUNCH_N - LAUNCH_N_FAIL + 0.5) / (LAUNCH_N + 1)  # Jeffreys mean, 0.99767
 SATS_PER_LAUNCH = 1           # ASSUMPTION: launch on failure, one dedicated launch per replacement
 
 # --- Replacement strategy b): in-orbit spares in the same plane ---
@@ -90,6 +104,9 @@ CADENCE_SATS_OPTIONS = (1, 2, 3)  # k values explored in the search of the minim
 # --- Mission requirement for the cadence search ---
 AVAIL_TARGET = 0.95      # ASSUMPTION: illustrative mission requirement (plane availability)
 AVAIL_CONFIDENCE = 0.95  # ASSUMPTION: illustrative mission requirement (fraction of runs)
+MC_CI_LEVEL = 0.95       # confidence level of the binomial interval of the Monte Carlo fractions
+                         # (conventional 95 %, numerical choice): a configuration whose interval
+                         # contains AVAIL_CONFIDENCE is not distinguishable from the requirement
 
 # --- Search settings (numerical, not physical) ---
 CADENCE_GRID_DAYS_PER_SAT = (90, 590, 20)  # sweep of T/k per plane [days]: start, stop, step
@@ -169,9 +186,9 @@ PLANE_GROUP_SWEEP_DEG = (2.0, 5.0, 10.0)  # sensitivity of the plane grouping
 # https://technology.esa.int/upload/media/DGHKMZ_6542582e18e33.pdf (requirement ID in each comment).
 # The text read does not cite ISO 27852; for the methods it refers to ESSB-HB-U-002 and
 # ECSS-E-ST-10-04.
-LEO_LIFETIME_LIMIT_YEARS = 5.0  # 5.4.2.3a.1: orbital lifetime in LEO after end of mission < 5 yr
-                                # (start of the count depends on the recurrent manoeuvre
-                                # capability: TO VERIFY on the document)
+LEO_LIFETIME_LIMIT_YEARS = 5.0  # 5.4.2.3a.1: orbital lifetime in LEO after end of mission < 5 yr.
+                                # Count from the end of life of each object (retirement for
+                                # the disposed ones, failure for the failed ones): TO VERIFY on ESSB
 CUM_COLLISION_PROB_LIMIT = 1e-3  # 5.4.2.3a.2: cumulative collision probability with objects
                                  # > 1 cm, from end of life to re-entry (MASTER flux x area x time)
 DISPOSAL_PROB_REF = 0.9          # 5.4.1.1a: probability of successful disposal > 0.9 (includes
@@ -191,10 +208,42 @@ EAGLET_BOX_M = (0.5, 0.4, 0.3)  # ASSUMPTION: box "the size of a microwave oven"
                                 # dimensions. Mean area of a tumbling convex body = surface / 4
                                 # (Cauchy), solar panels unknown -> sweep below
 EAGLET_AREA_FACTORS = (0.5, 1.0, 2.0)  # sensitivity sweep of the area [-]
-EAGLET_PROPULSION = False  # ASSUMPTION: no public source on a propulsion system (checked ESA, ASI,
-                           # OHB Italia): no disposal manoeuvre, no altitude keeping
+EAGLET_PROPULSION = True  # ASSUMPTION: no public source (checked ESA, ASI, OHB Italia). Main
+                          # argument: free-decay lifetime from 500 km ~2.3 yr (moderate activity,
+                          # decay.py) < 5 yr design life (DESIGN_LIFE_YEARS, itself an ASSUMPTION
+                          # without source). Weak hint: EAGLET 2-11 has da/dt > 0 (ndot < 0) in
+                          # the TLE of 2026-11-09, possibly a fit artefact. A TLE time series
+                          # (Space-Track) would be needed to confirm: future work.
+# Model (debris.py): operational satellite at constant altitude (ASSUMPTION: station-keeping
+# propellant not modelled, relevant mainly at 400-450 km). On-orbit failure = propulsion lost
+# -> natural decay from the operational altitude. At retirement a disposal manoeuvre is tried,
+# success probability DISPOSAL_PROB_REF (sweep DISPOSAL_PROB_SWEEP), applied ONLY to the
+# satellites reaching retirement; the effective P_d = disposed / all ends in orbit is a result,
+# compared with ESSB 5.4.1.1a (which includes the system reliability). Failed manoeuvre ->
+# natural decay from the operational altitude. Successful manoeuvre -> circular orbit at
+# DISPOSAL_ALT_KM, then natural decay. Launch failures leave no object in orbit.
+DISPOSAL_ALT_KM = 375.0  # ESSB-ST-U-007 5.4.2.3c (apogee < 375 km, large constellations;
+                         # applicability to Eaglet II TO VERIFY). ASSUMPTION: instantaneous
+                         # manoeuvre, delta-v and propellant not modelled
 DRAG_COEFFICIENT = 2.2     # ASSUMPTION: common value for a compact satellite in free-molecular
                            # flow; same value as the DRAMA/OSCAR Sentinel-3B reference run
+
+# --- MASTER-8 debris flux (debris.py) ---
+# Settings and source in the header of the file (MASTER 8.2.3, population data_2602_all,
+# SSO i = 97.4 deg, sphere target, debris only, 200-800 km step 50 km, asymmetric 1-sigma).
+MASTER_FLUX_CSV = "inputs/master8_flux_sso.csv"
+FLUX_SIZE = "1cm"  # ESSB 5.4.2.3a.2: collision probability with objects > 1 cm
+# ASSUMPTION: log-linear interpolation of the flux between the 50 km nodes (flux spans orders
+# of magnitude). Uncertainty: three separate runs low / nominal / high = nominal - sigma_minus,
+# nominal, nominal + sigma_plus, fully correlated over altitude (no symmetric Gaussian).
+# ASSUMPTION: flux neglected below 200 km (lowest MASTER node; the object re-enters in days).
+# Collision cross-section = mean area of the tumbling box (surface / 4), consistent with the
+# sphere target of MASTER; the debris size (>= 1 cm) is neglected against the satellite size.
+
+ALT_TRADE_KM = (400.0, 500.0, 600.0, 700.0, 800.0)  # altitude trade-off (v0.3): range of the plan,
+                                                  # inside the MASTER table; 100 km step for run time
+DEBRIS_SEED_STREAM = 7  # second entry of the seed sequence [SEED, 7] of the disposal draws
+                        # (separate stream: the lifecycle runs are unchanged)
 
 # --- Atmosphere for the drag decay (decay.py) ---
 # Piecewise exponential density (Vallado method) through the tabulated densities of

@@ -399,13 +399,14 @@ def constellation_revisit(raan0, u0, lat_deg, eta_rad, step_s, duration_s,
 
 def walker_search(eta_rad, step_s, duration_s, p_range, s_range, raan_spread_rad,
                   lat_deg=params.REVISIT_LAT_DEG, max_revisit_s=params.REVISIT_MAX_HOURS * 3600,
-                  min_access_s=params.MIN_ACCESS_S):
+                  min_access_s=params.MIN_ACCESS_S, a_m=None):
     """Smallest Walker P/S/F meeting the max-revisit requirement at one latitude.
 
     Explores P in p_range, S in s_range, F in 0..P-1. Picks the smallest total
     T = P*S; ties are broken by the smallest max revisit (then fewer planes).
     The configurations are evaluated by increasing T, and the search stops at the
     first T with a feasible configuration (same result, much faster).
+    a_m: semi-major axis [m] of the circular SSO (default: reference ALT_KM).
     Output: (best (P, S, F) or None, list of rows (P, S, F, max_s, mean_s) evaluated)
     """
     configs = [(n_planes, sats, phasing)
@@ -418,7 +419,8 @@ def walker_search(eta_rad, step_s, duration_s, p_range, s_range, raan_spread_rad
         for n_planes, sats, phasing in [c for c in configs if c[0] * c[1] == total]:
             raan0, u0 = walker_elements(n_planes, sats, phasing, raan_spread_rad)
             _, max_s, mean_s = constellation_revisit(raan0, u0, lat_deg, eta_rad, step_s,
-                                                     duration_s, min_access_s=min_access_s)
+                                                     duration_s, min_access_s=min_access_s,
+                                                     a_m=a_m)
             group.append((n_planes, sats, phasing, max_s[0], mean_s[0]))
         rows.extend(group)
         feasible = [r for r in group if r[3] <= max_revisit_s]
@@ -445,15 +447,16 @@ def rephased_constellation(raan0, u0, n_per_plane):
 
 
 def revisit_table_planes(n_planes, sats_per_plane, phasing, eta_rad, step_s, duration_s,
-                         raan_spread_rad, lat_deg=params.REVISIT_LAT_DEG):
+                         raan_spread_rad, lat_deg=params.REVISIT_LAT_DEG, alt_m=None):
     """Full lookup table revisit(n_1, ..., n_P) of the reference Walker, R1 rephasing.
 
     One entry for every combination of operational satellites per plane,
     n_p = 0..S: (S + 1)^P configurations (25 for 2/4).
+    alt_m: altitude of the circular SSO [m] (default: reference ALT_KM).
     Outputs: max_s, mean_s [s], arrays of shape (S + 1,) * P (inf if never revisited)
     """
     raan0, u0 = walker_elements(n_planes, sats_per_plane, phasing, raan_spread_rad)
-    a_m = R_E + params.ALT_KM * 1e3
+    a_m = R_E + (params.ALT_KM * 1e3 if alt_m is None else alt_m)
     return revisit_table_from_planes(raan0[:, 0], u0[:, 0], np.full(n_planes, a_m),
                                      np.full(n_planes, sso_inclination(a_m)), sats_per_plane,
                                      eta_rad, step_s, duration_s, lat_deg)

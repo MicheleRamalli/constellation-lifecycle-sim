@@ -17,6 +17,8 @@ Common model (all times in seconds):
   the earliest of on-orbit failure and retirement at design life.
 - Fixed time step dt. Events are detected at the first time step at or after
   they happen (detection delay between 0 and dt). Launches happen on the grid.
+- The satellites of one plane launched at the same time step fly on one launch,
+  with one success draw (a failed launch loses all of them).
 - Initial deployment: the first launch of each unit is given by initial_launch_s
   (e.g. from deployment_launch_times for a deployment in batches).
 
@@ -79,7 +81,11 @@ def cadence_launch_times(cadence_start_s, cadence_interval_s, sim_duration_s):
 
 
 def launch_satellites(n, t_launch_s, rng, design_life_s, launch_success_prob, reliability):
-    """Launch n satellites at the same time and draw their end of life.
+    """Launch n satellites together on ONE launch and draw their end of life.
+
+    One success draw per launch: if the launch fails, all n satellites are lost
+    (end of life = launch time). The satellites of one plane launched at the same
+    time step always share one launch (deployment, grouped reorders, successors).
 
     Inputs:
         n                   : number of satellites launched [-]
@@ -93,7 +99,7 @@ def launch_satellites(n, t_launch_s, rng, design_life_s, launch_success_prob, re
         t_end_s  : end-of-life time of each satellite [s], shape (n,)
         end_kind : ON_ORBIT_FAILURE, RETIREMENT or LAUNCH_FAILURE, shape (n,)
     """
-    success = rng.random(n) < launch_success_prob
+    success = np.full(n, rng.random() < launch_success_prob)  # one draw for the whole launch
     t_fail_s = sample_failure_times(n, rng=rng, **reliability)  # age at failure [s]
     life_s = np.minimum(t_fail_s, design_life_s)
     t_end_s = t_launch_s + np.where(success, life_s, 0.0)
@@ -130,7 +136,7 @@ def simulate_launch_on_failure(n_slots, n_runs, seed, sim_duration_s, dt_s, init
         "n_launched"        : satellites launched at each step, shape (n_runs, n_steps)
         "n_failures"        : on-orbit failures per run, shape (n_runs,)
         "n_retirements"     : retirements at design life per run, shape (n_runs,)
-        "n_launch_failures" : failed launches per run, shape (n_runs,)
+        "n_launch_failures" : satellites lost at launch per run, shape (n_runs,)
     """
     if sats_per_launch != 1:
         raise ValueError("Launch on failure: only one satellite per launch is supported")
@@ -194,23 +200,39 @@ def is_alive(status):
     return (status == COMMISSIONING) | (status == ACTIVE) | (status == SPARE)
 
 
+def end_events(end_log):
+    """Concatenate the end log of a simulation into flat arrays.
+
+    Output: dict with "end_run" (run index), "end_t_s" (exact end-of-life time [s]),
+    "end_kind" (ON_ORBIT_FAILURE, RETIREMENT or LAUNCH_FAILURE), one entry per
+    satellite that ended within the simulated time span.
+    """
+    return {"end_run": np.concatenate([e[0] for e in end_log]),
+            "end_t_s": np.concatenate([e[1] for e in end_log]),
+            "end_kind": np.concatenate([e[2] for e in end_log])}
+
+
 def new_counters(n_runs):
     """Per-run event counters shared by simulate_plane and simulate_fixed_cadence."""
     keys = ["n_failures", "n_retirements", "n_launch_failures", "n_spares_lost"]
     return {key: np.zeros(n_runs, dtype=int) for key in keys}
 
 
-def detect_ends(t, status, t_end_s, end_kind, counters):
+def detect_ends(t, status, t_end_s, end_kind, counters, end_log):
     """Find the live satellites whose end of life is reached at time t.
 
     Inputs:
         t                : current time [s]
         status, t_end_s, end_kind : record arrays, shape (n_runs, n_records)
         counters         : dict of per-run counters (new_counters), updated in place
+        end_log          : list, one tuple (run indices, exact end times [s], end kinds)
+                           is appended (input of the debris post-processing)
     Output:
         ended : boolean mask, shape (n_runs, n_records); the caller sets the new status
     """
     ended = is_alive(status) & (t >= t_end_s)
+    runs, records = np.nonzero(ended)
+    end_log.append((runs, t_end_s[runs, records], end_kind[runs, records]))
     counters["n_failures"] += np.sum(ended & (end_kind == ON_ORBIT_FAILURE), axis=1)
     counters["n_retirements"] += np.sum(ended & (end_kind == RETIREMENT), axis=1)
     counters["n_launch_failures"] += np.sum(ended & (end_kind == LAUNCH_FAILURE), axis=1)
@@ -330,12 +352,13 @@ def simulate_plane(n_slots, n_spares, reorder_level, pre_order_retirement, n_run
     n_spares_in_orbit = np.zeros((n_runs, n_steps), dtype=np.int16)
     n_launched = np.zeros((n_runs, n_steps), dtype=np.int16)
     counters = new_counters(n_runs)
+    end_log = []
 
     for k in range(n_steps):
         t = t_grid_s[k]
 
         # 1. Detect satellites that reached their end of life
-        ended = detect_ends(t, status, t_end_s, end_kind, counters)
+        ended = detect_ends(t, status, t_end_s, end_kind, counters, end_log)
         status[ended & has_successor] = FREE   # planned: the successor is on its way
         status[ended & ~has_successor] = DEAD  # unplanned loss
         has_successor[ended] = False
@@ -370,7 +393,7 @@ def simulate_plane(n_slots, n_spares, reorder_level, pre_order_retirement, n_run
         n_spares_in_orbit[:, k] = np.sum(status == SPARE, axis=1)
 
     return {"t_s": t_grid_s, "n_active": n_active, "n_spares_in_orbit": n_spares_in_orbit,
-            "n_launched": n_launched, **counters}
+            "n_launched": n_launched, **counters, **end_events(end_log)}
 
 
 def simulate_fixed_cadence(n_slots, cadence_sats, cadence_interval_s, cadence_start_s, n_runs,
@@ -423,13 +446,14 @@ def simulate_fixed_cadence(n_slots, cadence_sats, cadence_interval_s, cadence_st
     n_spares_in_orbit = np.zeros((n_runs, n_steps), dtype=np.int16)
     n_launched = np.zeros((n_runs, n_steps), dtype=np.int16)
     counters = new_counters(n_runs)
+    end_log = []
     t_next_cadence_s = cadence_start_s
 
     for k in range(n_steps):
         t = t_grid_s[k]
 
         # 1. Detect satellites that reached their end of life: no reorder
-        ended = detect_ends(t, status, t_end_s, end_kind, counters)
+        ended = detect_ends(t, status, t_end_s, end_kind, counters, end_log)
         status[ended] = FREE
 
         # 2. Cadence launch (same dates in every run)
@@ -453,7 +477,7 @@ def simulate_fixed_cadence(n_slots, cadence_sats, cadence_interval_s, cadence_st
         n_spares_in_orbit[:, k] = np.sum(status == SPARE, axis=1)
 
     return {"t_s": t_grid_s, "n_active": n_active, "n_spares_in_orbit": n_spares_in_orbit,
-            "n_launched": n_launched, **counters}
+            "n_launched": n_launched, **counters, **end_events(end_log)}
 
 
 def plane_availability(n_active, min_active, t_s, t_start_s):
@@ -508,15 +532,23 @@ def simulate_constellation(plane_simulator, plane_inputs, seed):
         "t_s"        : time grid [s], shape (n_steps,)
         "n_active"   : operational satellites per plane, shape (n_planes, n_runs, n_steps)
         "n_launched" : satellites launched by the constellation, shape (n_runs, n_steps)
+        "n_spares_in_orbit" : dormant spares of the constellation, shape (n_runs, n_steps)
         "n_failures", "n_retirements", "n_launch_failures", "n_spares_lost" :
                        constellation totals per run, shape (n_runs,)
+        "end_run", "end_t_s", "end_kind", "end_plane" : one entry per satellite
+                       that ended (see end_events), all planes
     """
     outs = [plane_simulator(seed=[seed, p], **inputs) for p, inputs in enumerate(plane_inputs)]
     result = {"t_s": outs[0]["t_s"],
               "n_active": np.stack([o["n_active"] for o in outs]),
               "n_launched": sum(o["n_launched"].astype(int) for o in outs)}
+    if "n_spares_in_orbit" in outs[0]:
+        result["n_spares_in_orbit"] = sum(o["n_spares_in_orbit"].astype(int) for o in outs)
     for key in ["n_failures", "n_retirements", "n_launch_failures", "n_spares_lost"]:
         result[key] = sum(o[key] for o in outs)
+    for key in ["end_run", "end_t_s", "end_kind"]:
+        result[key] = np.concatenate([o[key] for o in outs])
+    result["end_plane"] = np.concatenate([np.full(len(o["end_run"]), p) for p, o in enumerate(outs)])
     return result
 
 

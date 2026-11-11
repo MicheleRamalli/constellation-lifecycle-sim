@@ -4,13 +4,14 @@
 - Birth-death Markov chain of a pool of identical units with independent
   failure and replacement (in-orbit spares, one reorder per failure).
 - Binomial distribution of the operational units of the same pool.
+- Exact binomial confidence interval of a Monte Carlo fraction.
 
 All times in seconds, all rates in 1/s.
 """
 
 import numpy as np
 from scipy.integrate import quad
-from scipy.stats import binom
+from scipy.stats import beta, binom
 
 from reliability import reliability_analytic
 
@@ -166,31 +167,34 @@ def usable_distribution_cadence(t_s, launch_times_s, launch_counts, reliability,
                                 commissioning_s, launch_success_prob):
     """Exact distribution of usable satellites at time t, fixed cadence (strategy d).
 
-    No satellite is ever reordered and every satellite is independent (H1, H2:
-    same R(t) from launch, active or spare). A satellite of the cohort launched
-    at t_j is usable at time t iff its launch succeeded, it is commissioned
-    (age >= C), it has not failed (prob. R(age)) and it has not retired
-    (age < DL). So each cohort gives Binomial(k_j, q_j), q_j = p_launch R(t - t_j),
-    and U(t) is their sum (a Poisson-binomial distribution), computed exactly
-    by convolving the binomial pmfs.
+    No satellite is ever reordered and every satellite fails independently (H1,
+    H2: same R(t) from launch, active or spare). Each cohort is ONE launch with
+    one success draw. A satellite of the launch at t_j is usable at time t iff
+    the launch succeeded, it is commissioned (age >= C), it has not failed
+    (prob. R(age)) and it has not retired (age < DL). So the usable satellites
+    of launch j are 0 with prob. 1 - p_launch, Binomial(k_j, R(t - t_j)) with
+    prob. p_launch; U(t) is the sum over the launches (independent), computed
+    exactly by convolving their pmfs.
 
     Inputs:
         t_s                 : time [s]
-        launch_times_s      : launch time of each cohort [s], shape (n_cohorts,)
-        launch_counts       : satellites in each cohort [-], shape (n_cohorts,)
+        launch_times_s      : time of each launch [s], shape (n_launches,)
+        launch_counts       : satellites on each launch [-], shape (n_launches,)
         reliability         : dict with the reliability model
         design_life_s       : design life [s]
         commissioning_s     : commissioning time [s]
         launch_success_prob : probability that a launch succeeds [-]
     Output:
-        P(U = u), u = 0..total satellites of the usable cohorts
+        P(U = u), u = 0..total satellites of the usable launches
     """
     pmf = np.array([1.0])
     for t_j, k_j in zip(launch_times_s, launch_counts):
         age_s = t_s - t_j
         if commissioning_s <= age_s < design_life_s:
-            q = launch_success_prob * reliability_analytic(age_s, **reliability)
-            pmf = np.convolve(pmf, binom.pmf(np.arange(k_j + 1), k_j, q))
+            r = reliability_analytic(age_s, **reliability)
+            pmf_launch = launch_success_prob * binom.pmf(np.arange(k_j + 1), k_j, r)
+            pmf_launch[0] += 1.0 - launch_success_prob  # failed launch: no satellite
+            pmf = np.convolve(pmf, pmf_launch)
     return pmf
 
 
@@ -218,3 +222,22 @@ def reference_launch_rate(n_slots, reliability, design_life_s, commissioning_s):
     e_up_s = YEAR_S * quad(R_of_years, commissioning_s / YEAR_S, design_life_s / YEAR_S,
                            limit=200)[0]
     return n_slots / e_up_s
+
+
+def binomial_interval(n_ok, n, confidence=0.95):
+    """Exact (Clopper-Pearson) confidence interval of a binomial proportion.
+
+    Used for the Monte Carlo fractions: n independent runs, n_ok of them meet a
+    criterion. The bounds are quantiles of Beta distributions (C. J. Clopper,
+    E. S. Pearson, Biometrika 26 (1934) 404-413):
+        low  = Beta(n_ok, n - n_ok + 1) quantile at (1 - confidence) / 2
+        high = Beta(n_ok + 1, n - n_ok) quantile at 1 - (1 - confidence) / 2
+    with low = 0 when n_ok = 0 and high = 1 when n_ok = n.
+
+    Inputs: successes n_ok [-], trials n [-], confidence level [-]
+    Output: (low, high) bounds of the proportion [-]
+    """
+    tail = (1.0 - confidence) / 2.0
+    low = beta.ppf(tail, n_ok, n - n_ok + 1) if n_ok > 0 else 0.0
+    high = beta.ppf(1.0 - tail, n_ok + 1, n - n_ok) if n_ok < n else 1.0
+    return float(low), float(high)

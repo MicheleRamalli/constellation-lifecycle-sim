@@ -263,3 +263,11 @@ def test_per_satellite_orbits_equal_scalar_call():
                                        inc_rad=np.full(4, cv.sso_inclination(a)), **kwargs)
     np.testing.assert_array_equal(ref[1], per_sat[1])
     np.testing.assert_array_equal(ref[2], per_sat[2])
+
+
+def test_explicit_reference_altitude_gives_same_search():
+    """walker_search with a_m = reference SSO gives the same rows as the default."""
+    args = (np.radians(params.ETA_MAX_DEG), 60.0, 2 * 86400.0, (1, 2), (2, 3), np.radians(180.0))
+    _, rows_default = cv.walker_search(*args)
+    _, rows_explicit = cv.walker_search(*args, a_m=cv.R_E + params.ALT_KM * 1e3)
+    assert rows_default == rows_explicit
