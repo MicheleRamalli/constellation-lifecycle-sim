@@ -29,8 +29,12 @@ Figures:
                                     the IRIDE TLEs vs the drag model
 - end_of_life.png                 : residual lifetime and collision probability (> 1 cm,
                                     MASTER-8) of a failed satellite vs altitude
+- solar_cycle.png                 : solar activity scenarios (strong cycle = ECSS Table A-1,
+                                    weak cycle = OSCAR forecast) and Eaglet II residual
+                                    lifetime vs the phase of the end of life
 - altitude_trade.png              : altitude trade-off 400-800 km: launch rate of the cheapest
-                                    strategy vs debris indicators (only with --trade)
+                                    strategy vs debris indicators, constant activity and
+                                    solar cycle (only with --trade)
 
 Second scenario: IRIDE Eaglet II, planes reconstructed from the derived TLE table
 (inputs/iride_eaglet2_elements.csv, written by fetch_tle.py; planes.py).
@@ -41,7 +45,8 @@ Usage:
                             run; every other result is identical
     python main.py --full   also runs the T* check with the extra seeds
     python main.py --trade  also runs the altitude trade-off (altitude_trade.png)
-    Run time on the development laptop (2026-11-11): default ~8 min, --trade ~31 min.
+    Run time on the development laptop (2026-11-11): default ~8 min, --trade ~53 min
+    (solar cycle tables at 700-800 km take most of the extra time).
     --full adds ~4 min (measured before v0.3, not re-measured).
     To follow the progress when the output goes to a file: python -u main.py > run.log
 """
@@ -819,6 +824,7 @@ def decay_study():
             print(f"  {model:8s} {level:8s} constant activity: lifetime to "
                   + " / ".join(f"{e:.0f}" for e in params.DECAY_END_SWEEP_KM) + " km = "
                   + " / ".join(f"{t:.3f}" for t in t_years) + " yr")
+    s3b_solar_cycle_comparison(b_s3b)
 
     b = eaglet_ballistic_coefficient()
     print(f"Eaglet II: m = {params.EAGLET_MASS_KG} kg, box {params.EAGLET_BOX_M} m, "
@@ -889,6 +895,216 @@ def plot_decay(tables, b, alt_sat_m, observed, path):
 
 
 # ---------------------------------------------------------------------------
+# Time-varying solar activity (v0.3): strong cycle (ECSS Table A-1), weak cycle (OSCAR)
+# ---------------------------------------------------------------------------
+
+MONTH_ECSS_S = params.SOLAR_MONTH_DAYS * DAY_S   # one month of Table A-1 [s]
+MONTH_CAL_S = YEAR_S / 12.0                      # one calendar month, mean length [s]
+
+
+def months_since(date, epoch_month):
+    """Calendar months from the first day of epoch_month ("YYYY-MM") to date ("YYYY-MM-DD"),
+    with the fraction of the month (day - 1) / days in that month."""
+    d = np.datetime64(date, "D")
+    m = d.astype("datetime64[M]")
+    days_in_month = ((m + np.timedelta64(1, "M")).astype("datetime64[D]") - m.astype("datetime64[D]")).astype(int)
+    whole = (m - np.datetime64(epoch_month, "M")).astype(int)
+    return whole + (d - m.astype("datetime64[D]")).astype(int) / days_in_month
+
+
+def solar_scenarios(index=params.SOLAR_INDEX):
+    """The two time-varying solar activity scenarios.
+
+    Each scenario: dict with
+      "f107"         : F10.7 of each month [sfu]
+      "step_s"       : length of one month [s]
+      "periodic"     : the series repeats (strong cycle) or not (weak cycle)
+      "period_months": length of the repeated cycle, or None
+      "range_months" : (first, last) start phase of one full cycle (uniform phase draws)
+      "phase_of"     : function date -> phase (index of the series, fractional)
+    "weak cycle" is missing if the DRAMA file is not installed (message printed).
+    """
+    f_cycle = decay.read_solar_cycle(params.SOLAR_CYCLE_CSV, index)
+
+    def strong_phase(date, cycle25_start=params.CYCLE25_START):
+        start = cycle25_start if np.datetime64(date) >= np.datetime64(cycle25_start) else params.CYCLE24_START
+        return (np.datetime64(date, "D") - np.datetime64(start, "D")).astype(int) * DAY_S / MONTH_ECSS_S
+
+    scen = {"strong cycle": {"f107": f_cycle, "step_s": MONTH_ECSS_S, "periodic": True,
+                             "period_months": float(len(f_cycle)),
+                             "range_months": (0.0, float(len(f_cycle))), "phase_of": strong_phase,
+                             "source": f"ECSS-E-ST-10-04C Rev.1 Table A-1 (cycle 23, {index})"}}
+    if not os.path.exists(params.OSCAR_FORECAST_PATH):
+        print(f"  NOTE: {params.OSCAR_FORECAST_PATH} not found: 'weak cycle' scenario skipped")
+        return scen
+    year, month, f_oscar = decay.read_oscar_forecast(params.OSCAR_FORECAST_PATH)
+    epoch = f"{year[0]:04d}-{month[0]:02d}"
+    first = months_since(params.CYCLE25_START, epoch)
+    # end of cycle 25 in the forecast: minimum of F10.7 between 5 and 15 yr after its start
+    window = np.arange(int(first) + 60, int(first) + 180)
+    last = float(window[np.argmin(f_oscar[window])])
+    scen["weak cycle"] = {"f107": f_oscar, "step_s": MONTH_CAL_S, "periodic": False,
+                          "period_months": None, "range_months": (first, last),
+                          "phase_of": lambda date: months_since(date, epoch),
+                          "source": f"ESA forecast used by OSCAR ({params.OSCAR_FORECAST_INFO})"}
+    return scen
+
+
+def rho_levels(model):
+    """Altitude nodes [m] and density tables (3, n_alt) of one model at SOLAR_F107_NODES."""
+    alt_m, rho = decay.read_density_table(params.ATM_DENSITY_CSV, model)
+    return alt_m, np.vstack([rho[lv] for lv in params.SOLAR_ACTIVITY_LEVELS])
+
+
+def lifetime_scenario(alt_start_m, b, scen, phase, model=params.ATM_MODEL, interp=params.SOLAR_INTERP_REF):
+    """Lifetime [s] from alt_start_m to DECAY_END_ALT_KM in one solar scenario, start phase [months]."""
+    alt_m, levels = rho_levels(model)
+    return decay.lifetime_variable(alt_start_m, params.DECAY_END_ALT_KM * 1e3, alt_m,
+                                   params.SOLAR_F107_NODES, levels, b, scen["f107"], scen["step_s"],
+                                   phase, scen["periodic"], interp)
+
+
+def s3b_solar_cycle_comparison(b_s3b):
+    """Sentinel-3B lifetime with time-varying activity vs OSCAR (no tuning)."""
+    oscar_yr = params.S3B_LIFETIME_YEARS / (1.0 + params.S3B_MARGIN)
+    h0 = params.S3B_ALT_KM * 1e3
+    print(f"Sentinel-3B with time-varying solar activity, start {params.S3B_START} "
+          f"(OSCAR {oscar_yr:.2f} yr without margin):")
+    for name, scen in solar_scenarios().items():
+        phase = scen["phase_of"](params.S3B_START)
+        t_yr = lifetime_scenario(h0, b_s3b, scen, phase) / YEAR_S
+        print(f"  {name:12s} ({scen['source']}), phase {phase:.1f} months: {t_yr:.2f} yr "
+              f"({t_yr / oscar_yr - 1:+.0%} vs OSCAR)")
+        if name == "strong cycle":
+            sens = [("ln(rho) -> rho linear in F10.7",
+                     lifetime_scenario(h0, b_s3b, scen, phase, interp=params.SOLAR_INTERP_SENSITIVITY)),
+                    (params.SOLAR_INDEX_SENSITIVITY,
+                     lifetime_scenario(h0, b_s3b, solar_scenarios(params.SOLAR_INDEX_SENSITIVITY)["strong cycle"],
+                                       phase)),
+                    (params.ATM_MODEL_SENSITIVITY,
+                     lifetime_scenario(h0, b_s3b, scen, phase, model=params.ATM_MODEL_SENSITIVITY)),
+                    ("phase +6 months", lifetime_scenario(h0, b_s3b, scen, phase + 6)),
+                    ("phase -6 months", lifetime_scenario(h0, b_s3b, scen, phase - 6))]
+            print("    sensitivity: " + "; ".join(f"{k} {v / YEAR_S:.2f} yr" for k, v in sens))
+        else:
+            print("    diagnostic: same solar input as OSCAR, so the gap is due to the atmosphere model as "
+                  "used here. Plausible causes (not corrected): Ap tied to F10.7 by the ECSS tables (Ap ~ 1-3 "
+                  "at F10.7 ~ 70-80, forecast Ap ~ 5-13 -> our density lower, lifetime longer); ECSS tables "
+                  "equatorial and averaged over diurnal and seasonal variations vs the full NRLMSISE-00 along "
+                  "the SSO orbit in OSCAR; 13-month smoothed indices; re-entry altitude and margin convention")
+    print_cycle_warning(solar_scenarios())
+
+
+def cycle_peak(scen):
+    """Highest F10.7 [sfu] over one cycle of a scenario."""
+    lo, hi = scen["range_months"]
+    return scen["f107"][int(lo):int(hi)].max()
+
+
+def print_cycle_warning(scen):
+    """The strong cycle is not conservative for the 5-year rule: say it with every result."""
+    text = f"  NOTE: strong cycle = solar cycle 23, peak F10.7 {cycle_peak(scen['strong cycle']):.0f} sfu: it " \
+           "shortens the lifetimes, so it is NOT conservative for the 5-year rule"
+    if "weak cycle" in scen:
+        text += f"; weak cycle = forecast cycle 25 used by OSCAR, peak {cycle_peak(scen['weak cycle']):.0f} sfu"
+    print(text)
+
+
+def end_of_life_cycle_tables(alt_op_m, scen, grid_months, model=params.ATM_MODEL,
+                             interp=params.SOLAR_INTERP_REF):
+    """Residual lifetime and P_c (nominal flux) of each object class vs the phase of its end of life.
+
+    Inputs: operational altitude [m], solar scenario (solar_scenarios), start phases [months],
+            atmosphere model, density interpolation in F10.7
+    Output: dict as end_of_life_tables for one level, with arrays over grid_months, plus
+            "phase": {"grid_months", "period_months", "step_s", "range_months"} and
+            "censored": {outcome: bool array}, True where the forecast ended before the
+            re-entry (no extrapolation): lifetime, P_c and object-years are then LOWER bounds
+    """
+    atm_alt_m, levels = rho_levels(model)
+    flux_alt_m, flux = debris.read_master_flux(params.MASTER_FLUX_CSV, params.FLUX_SIZE, YEAR_S)
+    b, area_m2 = eaglet_ballistic_coefficient(), eaglet_area()
+    end_m = params.DECAY_END_ALT_KM * 1e3
+    residual, pc, censored = {}, {}, {}
+    for outcome, h0 in ((debris.FAILED, alt_op_m), (debris.DISPOSED, params.DISPOSAL_ALT_KM * 1e3)):
+        life, prob = np.empty(len(grid_months)), np.empty(len(grid_months))
+        cut = np.zeros(len(grid_months), dtype=bool)
+        for j, phase in enumerate(grid_months):
+            traj = decay.decay_trajectory(h0, end_m, atm_alt_m, params.SOLAR_F107_NODES, levels, b,
+                                          scen["f107"], scen["step_s"], phase, scen["periodic"], interp,
+                                          stop_at_end=True)
+            life[j], cut[j] = traj["t_s"][-1], not traj["reentered"]
+            prob[j] = debris.collision_probability(debris.flux_time_integral_trajectory(
+                traj, atm_alt_m, params.SOLAR_F107_NODES, levels, b, flux_alt_m, flux["nominal"], interp),
+                area_m2)
+        residual[outcome], pc[outcome], censored[outcome] = life, {"nominal": prob}, cut
+    for d in (residual, pc, censored):
+        d[debris.DISPOSAL_FAILED] = d[debris.FAILED]
+    return {"residual_s": residual, "pc": pc, "censored": censored,
+            "phase": {"grid_months": np.asarray(grid_months, dtype=float),
+                      "period_months": scen["period_months"], "step_s": scen["step_s"],
+                      "range_months": scen["range_months"]}}
+
+
+def phase_grid(scen, horizon_s, step_months=params.SOLAR_PHASE_GRID_MONTHS):
+    """Start phases [months] of the tables: one cycle (periodic) or one cycle + the horizon."""
+    lo, hi = scen["range_months"]
+    if scen["periodic"]:
+        return np.arange(lo, hi, step_months)
+    return np.arange(lo, hi + horizon_s / scen["step_s"] + step_months + 1.0, step_months)
+
+
+def over_cycle(table, phase):
+    """Values of a phase table over one full cycle (uniform phase), for statistics."""
+    grid = phase["grid_months"]
+    lo, hi = phase["range_months"]
+    return table[(grid >= lo) & (grid < hi)]
+
+
+def plot_solar_cycle(scen, cyc, alt_op_m, const, path):
+    """(a) F10.7 of the two scenarios; (b) residual lifetime vs phase of the end of life."""
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
+    colors = {"strong cycle": "tab:red", "weak cycle": "tab:blue"}
+    for name, s in scen.items():
+        lo, hi = s["range_months"]
+        k = np.arange(int(lo), int(hi) + 1)
+        ax1.plot((k - lo) * s["step_s"] / YEAR_S, s["f107"][k % len(s["f107"])], color=colors[name],
+                 label=f"{name}: {s['source']}")
+    for f, lv in zip(params.SOLAR_F107_NODES, params.SOLAR_ACTIVITY_LEVELS):
+        ax1.axhline(f, color="gray", linestyle=":", lw=1)
+        ax1.text(11.6, f + (3 if f > 70 else -9), f"ECSS {lv} ({f:.0f})", fontsize=7, color="gray",
+                 ha="right")
+    ax1.set_ylim(50, 300)
+    ax1.set_xlabel("Years from the start of the cycle")
+    ax1.set_ylabel("F10.7 [sfu]")
+    ax1.set_title("(a) Solar activity scenarios (one cycle)", fontsize=10)
+    ax1.legend(fontsize=7, loc="upper left")
+    styles = {debris.FAILED: ("-", f"failed at {alt_op_m / 1e3:.0f} km"),
+              debris.DISPOSED: ("--", f"disposed at {params.DISPOSAL_ALT_KM:.0f} km")}
+    for name, tab in cyc.items():
+        ph = tab["phase"]
+        lo, hi = ph["range_months"]
+        sel = (ph["grid_months"] >= lo) & (ph["grid_months"] < hi)
+        x = (ph["grid_months"][sel] - lo) * ph["step_s"] / YEAR_S
+        for outcome, (ls, label) in styles.items():
+            ax2.semilogy(x, tab["residual_s"][outcome][sel] / YEAR_S, ls, color=colors[name],
+                         label=f"{name}, {label}")
+    for lv, c in zip(params.SOLAR_ACTIVITY_LEVELS, ("C0", "C1", "C3")):
+        ax2.axhline(const[lv]["residual_s"][debris.FAILED] / YEAR_S, color=c, lw=0.8, linestyle=":",
+                    label=f"constant {lv}, failed")
+    ax2.axhline(params.LEO_LIFETIME_LIMIT_YEARS, color="k", linestyle="--", label="ESSB 5-yr limit")
+    ax2.set_xlabel("Phase of the end of life [years from the start of the cycle]")
+    ax2.set_ylabel(f"Residual lifetime to {params.DECAY_END_ALT_KM:.0f} km [yr]")
+    ax2.set_title(f"(b) Eaglet II, {params.ATM_MODEL}, ln(rho) interpolated in F10.7", fontsize=10)
+    ax2.legend(fontsize=7, loc="upper left", bbox_to_anchor=(1.01, 1.0))
+    for ax in (ax1, ax2):
+        ax.grid(True, which="both", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
 # Debris indicators (v0.3): end of life, 5-year rule, object-years, collisions
 # ---------------------------------------------------------------------------
 
@@ -934,6 +1150,10 @@ def operational_pc(alt_op_m):
 def debris_indicators(out, tables, p_manoeuvre):
     """Monte Carlo debris indicators of one constellation output, per solar activity level.
 
+    tables: {level: end_of_life_tables entry} and/or {scenario: end_of_life_cycle_tables};
+    for a solar cycle the phase at t = 0 is drawn uniform over one cycle (seed sequence
+    [SEED, SOLAR_PHASE_SEED_STREAM], same draws for every scenario) unless
+    tab["phase"]["start_fixed"] is given.
     The disposal draws use the seed sequence [SEED, DEBRIS_SEED_STREAM], the same
     for every level (common random numbers: the levels differ only by physics).
     Output: {level: debris.debris_summary dict + "collisions" (sum of P_c of the
@@ -943,11 +1163,23 @@ def debris_indicators(out, tables, p_manoeuvre):
     horizon_s = out["t_s"][-1]
     dt_s = out["t_s"][1] - out["t_s"][0]
     live = out["n_active"].sum(axis=0) + out.get("n_spares_in_orbit", 0)
+    n_runs = out["n_active"].shape[1]
     result = {}
     for level, tab in tables.items():
         rng = np.random.default_rng([params.SEED, params.DEBRIS_SEED_STREAM])
         pc = {outcome: tab["pc"][outcome]["nominal"] for outcome in tab["pc"]}
-        s = debris.debris_summary(out, p_manoeuvre, rng, tab["residual_s"], horizon_s, limit_s, pc)
+        phase = None
+        if "phase" in tab:   # solar cycle: phase of the mission start, per run
+            ph = tab["phase"]
+            if ph.get("start_fixed") is None:   # ASSUMPTION: uniform over one cycle
+                lo, hi = ph["range_months"]
+                u = np.random.default_rng([params.SEED, params.SOLAR_PHASE_SEED_STREAM]).random(n_runs)
+                start = lo + (hi - lo) * u
+            else:                               # known launch date (IRIDE)
+                start = np.full(n_runs, ph["start_fixed"])
+            phase = {"start_months": start, "step_s": ph["step_s"], "grid_months": ph["grid_months"],
+                     "period_months": ph["period_months"]}
+        s = debris.debris_summary(out, p_manoeuvre, rng, tab["residual_s"], horizon_s, limit_s, pc, phase)
         s["obj_years_operational"] = live.sum(axis=1) * dt_s / YEAR_S
         result[level] = s
     return result
@@ -1034,8 +1266,86 @@ def debris_study(cost):
         print(f"  {lv:8s}: dead object-years committed {mean_5_95(ind[lv]['obj_years_committed'] / YEAR_S)}, "
               f"inside the horizon {mean_5_95(ind[lv]['obj_years_horizon'] / YEAR_S)}; expected "
               f"collisions > 1 cm of the dead objects {ind[lv]['collisions'].mean():.2e}")
+    solar_cycle_debris(out, ref)
     plot_end_of_life(os.path.join(FIG_DIR, "end_of_life.png"))
     return sweep
+
+
+def lifetime_stats(values_s, limit_s):
+    """'mean (p5-p95)' in years and fraction <= limit of residual lifetimes over the phases."""
+    y = values_s / YEAR_S
+    return f"{y.mean():6.2f} ({np.percentile(y, 5):6.2f}-{np.percentile(y, 95):6.2f})", np.mean(values_s <= limit_s)
+
+
+def with_start(tab, start_months):
+    """Copy of a cycle table whose Monte Carlo phase at t = 0 is fixed (known launch date)."""
+    return {**tab, "phase": {**tab["phase"], "start_fixed": start_months}}
+
+
+def solar_cycle_debris(out, const):
+    """Residual lifetimes over the solar cycle and Monte Carlo 5-year compliance at ALT_KM.
+
+    Inputs: lifecycle output of the reference configuration, end_of_life_tables at ALT_KM
+    Output: dict with the cycle tables and the Monte Carlo indicators
+    """
+    alt_m = params.ALT_KM * 1e3
+    limit_s = params.LEO_LIFETIME_LIMIT_YEARS * YEAR_S
+    horizon_s = out["t_s"][-1]
+    scen = solar_scenarios()
+    cyc = {name: end_of_life_cycle_tables(alt_m, s, phase_grid(s, horizon_s)) for name, s in scen.items()}
+    sens = {f"strong, rho linear in F10.7": end_of_life_cycle_tables(
+                alt_m, scen["strong cycle"], phase_grid(scen["strong cycle"], horizon_s),
+                interp=params.SOLAR_INTERP_SENSITIVITY),
+            f"strong, {params.SOLAR_INDEX_SENSITIVITY}": end_of_life_cycle_tables(
+                alt_m, solar_scenarios(params.SOLAR_INDEX_SENSITIVITY)["strong cycle"],
+                phase_grid(scen["strong cycle"], horizon_s))}
+
+    print(f"Residual lifetime after the end of life [yr], Eaglet II, {params.ATM_MODEL}; solar cycle: "
+          "mean (5-95 %) over the phase of the end of life (uniform over one cycle) and fraction of "
+          f"phases compliant (<= {params.LEO_LIFETIME_LIMIT_YEARS:.0f} yr):")
+    classes = ((debris.FAILED, f"failed, {params.ALT_KM:.0f} km"),
+               (debris.DISPOSED, f"disposed, {params.DISPOSAL_ALT_KM:.0f} km"))
+    print(f"  {'scenario':34s}" + "".join(f"{label:>38s}" for _, label in classes))
+    for lv in params.SOLAR_ACTIVITY_LEVELS:
+        cells = []
+        for outcome, _ in classes:
+            t_s = const[lv]["residual_s"][outcome]
+            cells.append(f"{t_s / YEAR_S:6.2f}  compliant {float(t_s <= limit_s):.2f}")
+        print(f"  {'constant ' + lv:34s}" + "".join(f"{c:>38s}" for c in cells))
+    for name, tab in list(cyc.items()) + list(sens.items()):
+        cells = []
+        for outcome, _ in classes:
+            text, frac = lifetime_stats(over_cycle(tab["residual_s"][outcome], tab["phase"]), limit_s)
+            cells.append(f"{text}  compliant {frac:.2f}")
+        print(f"  {name:34s}" + "".join(f"{c:>38s}" for c in cells))
+        if any(np.any(c) for c in tab["censored"].values()):
+            print("    (some phases: forecast ended before the re-entry, lifetimes are lower bounds)")
+
+    phases = {name: s["phase_of"](params.IRIDE_FIRST_LAUNCH) for name, s in scen.items()}
+    phase_ecss = scen["strong cycle"]["phase_of"](params.IRIDE_FIRST_LAUNCH, params.CYCLE25_START_ECSS_ONLY)
+    lo_weak = scen["weak cycle"]["range_months"][0] if "weak cycle" in scen else 0.0
+    print(f"IRIDE first launch {params.IRIDE_FIRST_LAUNCH}: phase of cycle 25 = "
+          f"{phases['strong cycle']:.1f} months of 30 d (strong, cycle 25 from {params.CYCLE25_START}, "
+          f"DRAMA solcycle.lst; {phase_ecss:.1f} with the ECSS-only start {params.CYCLE25_START_ECSS_ONLY})"
+          + (f", {phases['weak cycle'] - lo_weak:.1f} calendar months (weak)" if "weak cycle" in phases else ""))
+
+    p_m = params.DISPOSAL_PROB_REF
+    cases = {f"constant {lv}": {lv: const[lv]} for lv in params.SOLAR_ACTIVITY_LEVELS}
+    for name, tab in cyc.items():
+        cases[f"{name}, phase uniform"] = {name: tab}
+        cases[f"{name}, IRIDE date"] = {name: with_start(tab, phases[name])}
+    cases["strong cycle, IRIDE date, ECSS-only start"] = {"strong cycle": with_start(cyc["strong cycle"], phase_ecss)}
+    print(f"Monte Carlo, p_manoeuvre = {p_m}, mean (5-95 %) per run: fraction of dead objects compliant, "
+          "dead object-years committed, expected collisions > 1 cm (nominal flux):")
+    mc = {}
+    for label, tables in cases.items():
+        ind = list(debris_indicators(out, tables, p_m).values())[0]
+        mc[label] = ind
+        print(f"  {label:42s} {mean_5_95(ind['frac_compliant']):>22s} "
+              f"{mean_5_95(ind['obj_years_committed'] / YEAR_S):>28s} {ind['collisions'].mean():.2e}")
+    print_cycle_warning(scen)
+    plot_solar_cycle(scen, cyc, alt_m, const, os.path.join(FIG_DIR, "solar_cycle.png"))
+    return {"tables": cyc, "mc": mc}
 
 
 def plot_end_of_life(path):
@@ -1121,6 +1431,7 @@ def altitude_trade(cost_ref):
     DISPOSAL_PROB_REF at every altitude.
     """
     rows = []
+    solar = solar_scenarios()
     for alt_km in params.ALT_TRADE_KM:
         scenario = altitude_scenario(alt_km)
         walker = altitude_coverage(alt_km)["walker"]
@@ -1145,6 +1456,15 @@ def altitude_trade(cost_ref):
             row[f"compliant_{lv}"] = np.nanmean(ind[lv]["frac_compliant"])
             row[f"objyr_{lv}"] = ind[lv]["obj_years_committed"].mean() / YEAR_S
             row[f"collisions_{lv}"] = ind[lv]["collisions"].mean()
+        for name, scen in solar.items():   # solar cycle: phase of the mission start uniform per run
+            tab = end_of_life_cycle_tables(alt_km * 1e3, scen, phase_grid(
+                scen, out["t_s"][-1], params.SOLAR_PHASE_GRID_TRADE_MONTHS))
+            ind_c = debris_indicators(out, {name: tab}, params.DISPOSAL_PROB_REF)[name]
+            row[f"life_failed_{name}"] = over_cycle(tab["residual_s"][debris.FAILED], tab["phase"]) / YEAR_S
+            row[f"censored_{name}"] = bool(np.any(tab["censored"][debris.FAILED]))
+            row[f"compliant_{name}"] = np.nanmean(ind_c["frac_compliant"])
+            row[f"objyr_{name}"] = ind_c["obj_years_committed"].mean() / YEAR_S
+            row[f"collisions_{name}"] = ind_c["collisions"].mean()
         row["pc_operational"] = operational_pc(alt_km * 1e3)
         rows.append(row)
 
@@ -1163,7 +1483,21 @@ def altitude_trade(cost_ref):
         for label, rate in r["equivalent"]:
             print(f"{'':15s} no single winner: {label} ({rate:.3f} sats/yr) is statistically "
                   "equivalent to the requirement")
-    plot_altitude_trade(rows, os.path.join(FIG_DIR, "altitude_trade.png"))
+    print(f"Same trade with the solar cycle (phase of the mission start uniform per run; failed "
+          f"lifetime over the phases, grid {params.SOLAR_PHASE_GRID_TRADE_MONTHS:.0f} months):")
+    print(f"{'h [km]':>6s} {'scenario':>13s} {'failed lifetime mean (5-95 %) [yr]':>36s} "
+          f"{'objects compliant':>18s} {'dead obj-yr/run':>16s} {'collisions/run':>15s}")
+    for r in rows:
+        for name in solar:
+            life = r[f"life_failed_{name}"]
+            bound = ">=" if r[f"censored_{name}"] else "  "
+            print(f"{r['alt_km']:6.0f} {name:>13s} {bound}{life.mean():8.1f} ({np.percentile(life, 5):6.1f}-"
+                  f"{np.percentile(life, 95):6.1f}){'':10s} {r[f'compliant_{name}']:18.2f} "
+                  f"{bound}{r[f'objyr_{name}']:14.1f} {r[f'collisions_{name}']:15.1e}")
+    if any(r[f"censored_{n}"] for r in rows for n in solar):
+        print("  >= : the OSCAR forecast ends (12/2129) before the re-entry for some phases: lower bound")
+    print_cycle_warning(solar)
+    plot_altitude_trade(rows, os.path.join(FIG_DIR, "altitude_trade.png"), list(solar))
     return rows
 
 
@@ -1172,8 +1506,22 @@ def short_label(label):
     return label.replace(" per plane", "").replace(" early ordering", "")
 
 
-def plot_altitude_trade(rows, path):
-    """Launch rate, failed-object lifetime, dead object-years and P_c vs altitude."""
+CYCLE_STYLE = {"strong cycle": ("s--", "tab:brown"), "weak cycle": ("D--", "tab:green")}
+
+
+def mark_lower_bounds(ax, rows, name, values, color):
+    """Open marker and '>=' where the forecast ended before the re-entry (lower bound)."""
+    for r, v in zip(rows, values):
+        if r[f"censored_{name}"]:
+            ax.plot(r["alt_km"], v, "o", ms=12, mfc="none", color=color)
+            ax.annotate(">= (forecast ends 2129)", (r["alt_km"], v), textcoords="offset points",
+                        xytext=(-6, -14), ha="right", fontsize=7, color=color)
+
+
+def plot_altitude_trade(rows, path, cycles=()):
+    """Launch rate, failed-object lifetime, dead object-years and P_c vs altitude.
+
+    cycles: names of the solar cycle scenarios to add to panels (b) and (c)."""
     alt = np.array([r["alt_km"] for r in rows])
     levels = params.SOLAR_ACTIVITY_LEVELS
     colors = ["tab:blue", "tab:orange", "tab:red"]
@@ -1197,12 +1545,21 @@ def plot_altitude_trade(rows, path):
     ax = axes[0, 1]
     for lv, c in zip(levels, colors):
         ax.semilogy(alt, [r[f"life_failed_{lv}"] for r in rows], "o-", color=c, label=f"{lv} activity")
+    for name in cycles:
+        marker, c = CYCLE_STYLE[name]
+        ax.semilogy(alt, [r[f"life_failed_{name}"].mean() for r in rows], marker, color=c,
+                    label=f"{name}{' (NOT conservative)' if name == 'strong cycle' else ''}, mean over phases")
+        mark_lower_bounds(ax, rows, name, [r[f"life_failed_{name}"].mean() for r in rows], c)
     ax.axhline(params.LEO_LIFETIME_LIMIT_YEARS, color="k", linestyle="--", label="ESSB 5-yr limit")
     ax.set_ylabel("Residual lifetime of a failed satellite [yr]")
     ax.set_title("(b) Natural decay from the operational altitude")
     ax = axes[1, 0]
     for lv, c in zip(levels, colors):
         ax.semilogy(alt, [r[f"objyr_{lv}"] for r in rows], "o-", color=c, label=f"{lv} activity")
+    for name in cycles:
+        marker, c = CYCLE_STYLE[name]
+        ax.semilogy(alt, [r[f"objyr_{name}"] for r in rows], marker, color=c, label=name)
+        mark_lower_bounds(ax, rows, name, [r[f"objyr_{name}"] for r in rows], c)
     ax.set_ylabel("Dead object-years per run (committed)")
     ax.set_title(f"(c) Objects left in {params.SIM_DURATION_YEARS:.0f} yr, p_manoeuvre = "
                  f"{params.DISPOSAL_PROB_REF}")

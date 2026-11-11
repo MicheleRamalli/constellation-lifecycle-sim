@@ -19,11 +19,18 @@ bands, with no numerical integration:
       = sqrt(pi H) erfi(sqrt(a/H)) = 2 sqrt(H) e^(a/H) D(sqrt(a/H))
 where D is the Dawson function (scipy.special.dawsn). The form with D avoids the
 overflow of erfi for large a/H (a/H ~ 100 in LEO).
+
+Time-varying solar activity (decay_trajectory): F10.7(t) is constant inside each
+month (Table A-1 of ECSS-E-ST-10-04C Rev.1 gives 30-day averages), the density
+table of the month is interpolated between the three ECSS tables in ln(rho) vs
+F10.7 (density_at_f107), and the closed form above is applied month by month.
+With a constant F10.7 this is exactly the constant-activity lifetime.
 """
 
 import csv
 
 import numpy as np
+from scipy.optimize import brentq
 from scipy.special import dawsn
 
 import params
@@ -122,6 +129,129 @@ def read_density_table(path, model):
     alt_m = np.array([float(r["alt_km"]) for r in rows]) * 1e3
     return alt_m, {level: np.array([float(r[c]) for r in rows])
                    for level, c in zip(params.SOLAR_ACTIVITY_LEVELS, columns)}
+
+
+# ---------------------------------------------------------------------------
+# Time-varying solar activity (F10.7 series, one value per month)
+# ---------------------------------------------------------------------------
+
+def read_solar_cycle(path, column):
+    """One column of ECSS-E-ST-10-04C Rev.1 Table A-1 (params.SOLAR_CYCLE_CSV).
+
+    Inputs: CSV path; column name, e.g. "F81mean" or "F10mean"
+    Output: index value of each 30-day month of solar cycle 23 [sfu], shape (140,)
+    """
+    with open(path) as f:
+        rows = list(csv.DictReader(l for l in f if not l.startswith("#")))
+    months = [int(r["month"]) for r in rows]
+    if months != list(range(len(rows))):
+        raise ValueError("Months of Table A-1 not in sequence 0, 1, 2, ...")
+    return np.array([float(r[column]) for r in rows])
+
+
+def read_oscar_forecast(path):
+    """Monthly F10.7 of the DRAMA/OSCAR long-term forecast file fap_mon.dat.
+
+    Column 6 of the file = predicted 13-month centred mean of F10.7 (equal to the
+    observed smoothed value before the forecast starts); see the file header.
+    Inputs: path of fap_mon.dat
+    Output: (year, month, F10.7 [sfu]) arrays, one entry per calendar month, in order
+    """
+    data = np.loadtxt(path, comments="#")
+    month, year, f107 = data[:, 0].astype(int), data[:, 1].astype(int), data[:, 5]
+    if np.any(np.diff(year * 12 + month) != 1):
+        raise ValueError("fap_mon.dat: months not consecutive")
+    return year, month, f107
+
+
+def density_at_f107(f107, f107_nodes, rho_levels, interp="log"):
+    """Density table [kg/m^3] at the altitude nodes for one F10.7 value.
+
+    Interpolation between the three ECSS tables (low / moderate / high activity):
+        "log"    : ln(rho) linear in F10.7 (reference)
+        "linear" : rho linear in F10.7 (sensitivity)
+    At the nodes F10.7 = 65, 140, 250 the table itself is returned. No extrapolation:
+    F10.7 outside [f107_nodes[0], f107_nodes[-1]] raises ValueError.
+    Inputs: F10.7 [sfu], node values of F10.7 [sfu] (increasing), rho_levels array
+            (n_levels, n_alt) [kg/m^3], interpolation kind
+    Output: densities at the altitude nodes, shape (n_alt,)
+    """
+    f_nodes = np.asarray(f107_nodes, dtype=float)
+    rho = np.asarray(rho_levels, dtype=float)
+    if not f_nodes[0] <= f107 <= f_nodes[-1]:
+        raise ValueError(f"F10.7 = {f107} outside [{f_nodes[0]}, {f_nodes[-1]}] (no extrapolation)")
+    i = min(np.searchsorted(f_nodes, f107, side="right") - 1, len(f_nodes) - 2)
+    w = (f107 - f_nodes[i]) / (f_nodes[i + 1] - f_nodes[i])     # weight of the upper node, 0..1
+    if interp == "log":
+        return np.exp((1.0 - w) * np.log(rho[i]) + w * np.log(rho[i + 1]))
+    if interp == "linear":
+        return (1.0 - w) * rho[i] + w * rho[i + 1]
+    raise ValueError("interp must be 'log' or 'linear'")
+
+
+def decay_trajectory(alt_start_m, alt_end_m, alt_nodes_m, f107_nodes, rho_levels, b_m2_kg,
+                     f107_series, step_s, start_index, periodic, interp="log", stop_at_end=False):
+    """Decay with a time-varying solar activity, constant inside each step (one month).
+
+    Inside step k the activity F10.7 = f107_series[k] is constant, so the closed form
+    of lifetime() holds: the altitude at the end of the step is the root h of
+        lifetime(h_k, h, rho(F_k)) = step length     (scipy brentq, like fzero)
+    The decay ends inside the first step whose remaining lifetime is shorter than
+    the step. With a constant series this gives lifetime() exactly (time is additive).
+
+    Inputs:
+        alt_start_m, alt_end_m : initial and final altitude [m]
+        alt_nodes_m, rho_levels: density table (n_levels, n_alt), levels at f107_nodes
+        b_m2_kg                : ballistic coefficient [m^2/kg]
+        f107_series            : F10.7 of each step [sfu]
+        step_s                 : length of one step [s]
+        start_index            : index (may be fractional) of the series at the start
+        periodic               : True -> the series repeats (index modulo its length);
+                                 False -> running past its end raises ValueError, or
+                                 stops there if stop_at_end (no extrapolation)
+        interp                 : "log" or "linear" (density_at_f107)
+    Output: dict "t_s" (times of the step boundaries crossed + final time, starting at 0),
+            "alt_m" (altitude at those times), "f107" (activity of each segment);
+            len(f107) = len(t_s) - 1; "reentered" False if stopped at the end of the
+            series (then t_s[-1] is only a lower bound of the lifetime)
+    """
+    series = np.asarray(f107_series, dtype=float)
+    k = int(np.floor(start_index))
+    dt_s = (k + 1 - start_index) * step_s       # first step may be partial
+    t_list, alt_list, f_list = [0.0], [alt_start_m], []
+    alt_m = alt_start_m
+    while True:
+        if periodic:
+            f107 = series[k % len(series)]
+        elif k < len(series):
+            f107 = series[k]
+        elif stop_at_end:
+            return {"t_s": np.array(t_list), "alt_m": np.array(alt_list), "f107": np.array(f_list),
+                    "reentered": False}
+        else:
+            raise ValueError("Solar activity series ended before the re-entry")
+        rho = density_at_f107(f107, f107_nodes, rho_levels, interp)
+        t_rest_s = lifetime(alt_m, alt_end_m, alt_nodes_m, rho, b_m2_kg)
+        f_list.append(f107)
+        if t_rest_s <= dt_s:
+            t_list.append(t_list[-1] + t_rest_s)
+            alt_list.append(alt_end_m)
+            break
+        alt_m = brentq(lambda h: lifetime(alt_m, h, alt_nodes_m, rho, b_m2_kg) - dt_s,
+                       alt_end_m, alt_m, xtol=1e-6, rtol=1e-14)
+        t_list.append(t_list[-1] + dt_s)
+        alt_list.append(alt_m)
+        k += 1
+        dt_s = step_s
+    return {"t_s": np.array(t_list), "alt_m": np.array(alt_list), "f107": np.array(f_list),
+            "reentered": True}
+
+
+def lifetime_variable(alt_start_m, alt_end_m, alt_nodes_m, f107_nodes, rho_levels, b_m2_kg,
+                      f107_series, step_s, start_index, periodic, interp="log"):
+    """Lifetime [s] with time-varying solar activity: last time of decay_trajectory."""
+    return decay_trajectory(alt_start_m, alt_end_m, alt_nodes_m, f107_nodes, rho_levels, b_m2_kg,
+                            f107_series, step_s, start_index, periodic, interp)["t_s"][-1]
 
 
 def sma_rate_from_ndot(a_m, n_rad_s, ndot_rad_s2):

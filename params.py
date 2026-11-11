@@ -264,6 +264,61 @@ DECAY_END_ALT_KM = 150.0  # ASSUMPTION: altitude where the orbit is considered r
                           # main.py); OSCAR's value is not stated in the DRAMA 4.1.4 user documentation
 DECAY_END_SWEEP_KM = (100.0, 150.0, 200.0)  # sensitivity of the lifetime to the end altitude
 
+# --- Time-varying solar activity (decay.decay_trajectory, v0.3) ---
+# Density at a given F10.7: interpolation between the three NRLMSISE-00 / JB-2006 tables
+# above, at their F10.7 values (Table 6-3 long-term: low 65, moderate 140, high 250, page 45;
+# Tables G-1..G-3 use F10.7 = F10.7avg at these values).
+SOLAR_F107_NODES = (65.0, 140.0, 250.0)
+# ASSUMPTION: ln(rho) linear in F10.7 between the nodes (reference); rho linear in F10.7 as
+# sensitivity. Argument: ln(rho) is concave in F10.7 at every node 120-900 km in both models
+# (checked in tests/test_solar_cycle.py), so if the true curve keeps this curvature the log
+# interpolation gives a LOWER density -> LONGER lifetime (conservative for the 5-year rule) and
+# the linear one an upper density. Outside 65-250: ValueError (no extrapolation).
+# ASSUMPTION: Ap is interpolated together with F10.7 (Tables G-1..G-3 pair F10.7 = 65/140/250
+# with Ap = 0/15/45), although Ap is only weakly correlated with F10.7 (6.2.2 NOTE 1).
+SOLAR_INTERP_REF = "log"
+SOLAR_INTERP_SENSITIVITY = "linear"
+# Scenario "strong cycle": ECSS-E-ST-10-04C Rev.1 Table A-1 (solar cycle 23, 30-day months,
+# pages 85-88), required for realistic index sequences by 0760023c (page 45). Cycle 23 is a
+# strong cycle (F81 peak 224 sfu): it shortens the lifetimes, so it is NOT conservative for
+# the 5-year rule.
+SOLAR_CYCLE_CSV = "inputs/ecss_solar_cycle23.csv"
+SOLAR_INDEX = "F81mean"              # 81-day average: input of the atmosphere models (6.2.2 NOTE 2)
+SOLAR_INDEX_SENSITIVITY = "F10mean"  # monthly mean of the daily F10.7
+SOLAR_MONTH_DAYS = 30.0              # Table A-1: 30-day (1 month) intervals
+# ASSUMPTION: Table A-1 month 0 = start (minimum) of the cycle, and the cycle repeats with
+# period 140 months (11.5 yr); needed because lifetimes exceed one cycle.
+# Scenario "weak cycle": ESA long-term forecast used by OSCAR ("latest prediction"), file
+# TOOLS/OSCAR/data/fap_mon.dat of DRAMA 4.1.4, header "Last Update: 2021 May 4", last definitive
+# point 10/2020, prediction to 12/2129. Column used: predicted 13-month centred mean F10.7.
+# Cycle 25 peak ~146 sfu (2025). Read at run time, NEVER copied into this repository; if the
+# file is missing the scenario is skipped. Calendar months (step = 1/12 yr), not periodic.
+OSCAR_FORECAST_PATH = "/Applications/DRAMA-4.1.4/TOOLS/OSCAR/data/fap_mon.dat"
+OSCAR_FORECAST_INFO = "DRAMA 4.1.4 fap_mon.dat, last update 2021-05-04"
+# Start dates of the solar cycles (phase 0):
+# cycle 24: 2008-12-01 = DRAMA 4.1.4 TOOLS/OSCAR/data/solcycle.lst (cycle 24 1 Dec 2008 - 31 Dec
+#           2019); ECSS-E-ST-10-04C Rev.1 Table B-2 gives the cycle 24 minimum at 2008.9 (agrees).
+# cycle 25: 2020-01-01 = DRAMA solcycle.lst (end of cycle 24 on 2019-12-31). NOT in the ECSS
+#           (Table B-2 stops at the cycle 24 minimum; formula B-1 gives maxima only). The ECSS-only
+#           alternative 2008.9 + 11.5 yr (Table A-1 length) = 2020.4 is used as sensitivity.
+#           The forecast file has its minimum F10.7 in 12/2019 (consistent).
+CYCLE24_START = "2008-12-01"
+CYCLE25_START = "2020-01-01"
+CYCLE25_START_ECSS_ONLY = "2020-06-01"  # 2008-12-01 + 140 x 30 days (sensitivity)
+# Phase of the start of the mission (lifecycle time t = 0 = first launch):
+# general case: ASSUMPTION uniform over one cycle, one draw per Monte Carlo run (launch date
+# unknown with respect to the cycle); strong cycle 0-140 months; weak cycle from the start of
+# cycle 25 to the next minimum of the forecast (found in the file).
+# IRIDE case: first launch of the Eaglet II satellites 2025-11-28 (date given by the user,
+# TO VERIFY with a public launch record).
+IRIDE_FIRST_LAUNCH = "2025-11-28"
+SOLAR_PHASE_SEED_STREAM = 8  # seed sequence [SEED, 8] of the mission start phase (separate stream)
+SOLAR_PHASE_GRID_MONTHS = 1.0  # spacing of the phase grid of the residual lifetime tables [months]
+SOLAR_PHASE_GRID_TRADE_MONTHS = 3.0  # coarser grid in the altitude trade (run time; the residual
+                                    # lifetime varies smoothly with the phase at 600-800 km)
+# Weak cycle: the forecast ends in 12/2129; where the decay is not over by then (800 km) the
+# lifetime is reported as a LOWER bound ('>='), no extrapolation.
+
 # --- Reference case for decay.py: DRAMA 4.1.4 OSCAR, Sentinel-3B tutorial (run by the user) ---
 # Circular orbit, C_D 2.2, NRLMSISE-00, ESA "latest prediction" solar activity, start 2018-04-26;
 # result 14.28 yr INCLUDING a 5 % lifetime margin (OSCAR documentation: recommended by
@@ -274,6 +329,7 @@ S3B_AREA_M2 = 16.435
 S3B_MASS_KG = 1130.0
 S3B_LIFETIME_YEARS = 14.28
 S3B_MARGIN = 0.05
+S3B_START = "2018-04-26"  # start date of the OSCAR run (phase of cycle 24 for the strong cycle)
 
 # --- Simulation ---
 SIM_DURATION_YEARS = 15.0  # ASSUMPTION: reference mission horizon, to be reviewed
