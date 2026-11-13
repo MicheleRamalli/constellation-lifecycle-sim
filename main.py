@@ -1808,7 +1808,7 @@ def casualty_study(results, cost):
                 elif kind == "committed":
                     print(f"    {case:10s}: E_c = 0 per re-entry (full demise) -> 0")
     n_sats = params.N_PLANES * params.N_SLOTS
-    print(f"  Large constellations (>= {params.LARGE_CONST_MIN_SATS} satellites, ESSB 3.2.25, TO VERIFY): "
+    print(f"  Large constellations (>= {params.LARGE_CONST_MIN_SATS} satellites, ESSB 3.2.25): "
           f"limit {params.CASUALTY_RISK_LIMIT_LARGE_CONST:.0e} per re-entry (5.5d.1) NOT applicable to the "
           f"reference Walker ({n_sats} satellites) nor to IRIDE Eaglet II (24); for information only.")
     if "components" in sara and years_rho:
