@@ -202,6 +202,37 @@ CASUALTY_RISK_LIMIT = 1e-4       # 5.5b: on-ground casualty risk of a re-entry <
 DISPOSAL_PROB_LARGE_CONST = 0.95        # 5.4.1.1b: probability of successful disposal > 0.95
 CASUALTY_RISK_LIMIT_LARGE_CONST = 1e-6  # 5.5d.1: casualty risk < 1e-6
 APOGEE_LIMIT_LARGE_CONST_KM = 375.0     # 5.4.2.3c: apogee < 375 km (wording TO VERIFY)
+LARGE_CONST_MIN_SATS = 100  # 3.2.25: definition of large constellation (threshold given by the
+                            # user, wording TO VERIFY on ESSB); IRIDE Eaglet II has 24 satellites
+
+# --- On-ground casualty risk of the re-entries (casualty.py, v0.3) ---
+# Casualty area of a fragment A_c = (sqrt(A_h) + sqrt(A_i))^2: NASA-STD-8719.14 (Process for
+# Limiting Orbital Debris), debris casualty area with a person of 0.36 m^2 (clause TO VERIFY).
+# DRAMA 4.1.4 SARA uses the same model: reproduced to machine precision (tests/test_casualty.py).
+CASUALTY_HUMAN_AREA_M2 = 0.36
+# Two DRAMA 4.1.4 SARA runs by the user (run mode "Reentry-risk", no Monte Carlo), Eaglet II-like
+# satellite: 25 kg (EAGLET_MASS_KG), box EAGLET_BOX_M, tumbling, uncontrolled re-entry from a
+# circular orbit, osculating a = 6510 km, e = 0.001, i = 97.4 deg, start 2030-04-27,
+# 1D projection with inclinationAngle = 97.4 deg, population UN WPP 2022 MEDIUM-VARIANT,
+# casualty threshold 15 J. Read at run time, never copied (skipped if missing).
+# ASSUMPTION (both inventories): no Eaglet II internal layout is public.
+SARA_RUNS = {
+    "base": {
+        "folder": "~/DRAMA_projects/EagletII_SARA",
+        "text": "all AA7075 structure (optimistic, wall ~10 mm)"},
+    "components": {
+        "folder": "~/DRAMA_projects/EagletII_SARA_components",
+        "text": "AA7075 structure 16 kg + 4 A316 wheels 0.5 kg, TiAl6V4 tank 1.5 kg, "
+                "Zerodur-proxy optics 2 kg, battery 1.5 kg, electronics 2 kg (pessimistic)"},
+}
+SARA_OUTPUT_FILE = "output/dmf_output.json"  # inside each folder
+REENTRY_INC_DEG = 97.4  # inclination of the SARA runs (IRIDE Eaglet II SSO, as the MASTER-8 runs)
+# 1D population density vs latitude shipped with DRAMA 4.1.4 SARA (UN World Population Prospects
+# 2022, re-distributed by ESA): step 1/120 deg, people/km^2, columns 2024-2100. Read at run time.
+SARA_POPULATION_1D_PATH = ("/Applications/DRAMA-4.1.4/TOOLS/SARA/RISK/data/Population_Density_1D/"
+                           "Population_Growth_1D_MEDIUM-VARIANT.csv")  # scenario of the SARA runs
+POPULATION_YEAR = 2030  # year of the SARA re-entry epoch (2030-04-27); the column SARA used
+POPULATION_YEARS_SWEEP = (2025, 2030, 2035, 2040, 2045)  # sensitivity: span of the re-entries
 
 # --- Eaglet II satellite (decay.py) ---
 # Mass: ESA, 31/03/2026 (~25 kg), https://www.esa.int/Applications/Observing_the_Earth/IRIDE/

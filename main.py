@@ -32,6 +32,9 @@ Figures:
 - solar_cycle.png                 : solar activity scenarios (strong cycle = ECSS Table A-1,
                                     ESA forecast 2021 = fap_mon.dat) and Eaglet II residual
                                     lifetime vs the phase of the end of life
+- casualty_risk.png               : on-ground casualty risk (DRAMA SARA): E_c of one re-entry
+                                    vs population year and expected casualties of the
+                                    re-entries of each configuration
 - altitude_trade.png              : altitude trade-off 400-800 km: launch rate of the cheapest
                                     strategy vs debris indicators, constant activity and
                                     solar cycle (only with --trade)
@@ -62,6 +65,7 @@ from matplotlib.ticker import FormatStrFormatter, NullFormatter
 from scipy.integrate import quad
 from scipy.optimize import brentq
 
+import casualty
 import coverage
 import debris
 import decay
@@ -1697,6 +1701,161 @@ def plot_altitude_trade(rows, path, cycles=()):
     plt.close(fig)
 
 
+# ---------------------------------------------------------------------------
+# On-ground casualty risk of the re-entries (v0.3): DRAMA SARA + constellation
+# ---------------------------------------------------------------------------
+
+def sci_5_95(x):
+    """'mean (p5-p95)' of an array in scientific notation."""
+    return f"{x.mean():.2e} ({np.percentile(x, 5):.2e}-{np.percentile(x, 95):.2e})"
+
+
+def reentry_counts(out, residual_s, p_manoeuvre):
+    """Re-entries per run of one constellation output.
+
+    Inputs: lifecycle output, residual lifetime [s] of each outcome (end_of_life_tables,
+            one solar level), success probability of the disposal manoeuvre [-]
+    Output: dict of arrays, shape (n_runs,):
+        "committed" : satellites that reached orbit within the horizon (launched - lost at
+                      launch); each one re-enters uncontrolled sooner or later. A satellite
+                      launched AND lost at launch in the very last time step counts as in orbit.
+        "horizon"   : objects whose re-entry (end of life + residual lifetime) falls inside
+                      the horizon; disposal draws as debris_indicators (stream DEBRIS_SEED_STREAM)
+    """
+    n_runs = out["n_launched"].shape[0]
+    committed = out["n_launched"].sum(axis=1) - out["n_launch_failures"]
+    rng = np.random.default_rng([params.SEED, params.DEBRIS_SEED_STREAM])
+    in_orbit, outcome = debris.object_outcomes(out["end_kind"], p_manoeuvre, rng)
+    run = out["end_run"][in_orbit]
+    t_end_s = out["end_t_s"][in_orbit]
+    t_reentry_s = t_end_s + debris.object_values(residual_s, outcome, run, t_end_s)
+    horizon = np.bincount(run, weights=t_reentry_s <= out["t_s"][-1], minlength=n_runs)
+    return {"committed": committed.astype(float), "horizon": horizon}
+
+
+def casualty_study(results, cost):
+    """Casualty risk of one re-entry (DRAMA SARA, checked) and of the constellation.
+
+    Inputs: outputs of the four strategies (main), cost_study output (configurations d)
+    Output: dict with the SARA cases, rho_eff and the per-configuration risk (None if
+            no SARA run is available)
+    """
+    print(f"SARA runs (DRAMA 4.1.4, read at run time), Eaglet II-like, i = {params.REENTRY_INC_DEG} deg, "
+          f"year {params.POPULATION_YEAR}, A_h = {params.CASUALTY_HUMAN_AREA_M2} m^2:")
+    sara = {}
+    for name, run in params.SARA_RUNS.items():
+        path = casualty.sara_output_path(run["folder"], params.SARA_OUTPUT_FILE)
+        if path is None:
+            print(f"  NOTE: {run['folder']} not found: case '{name}' skipped")
+            continue
+        sara[name] = casualty.read_sara_results(path)
+    if not sara:
+        return None
+
+    have_pop = os.path.exists(params.SARA_POPULATION_1D_PATH)
+    rho_eff = None
+    if have_pop:
+        lat_deg, rho = casualty.read_population_1d(params.SARA_POPULATION_1D_PATH, params.POPULATION_YEAR)
+        rho_eff = casualty.effective_density(lat_deg, rho, params.REENTRY_INC_DEG)
+    else:
+        print(f"  NOTE: {params.SARA_POPULATION_1D_PATH} not found: independent rho_eff skipped")
+
+    for name, s in sara.items():
+        print(f"  {name} ({params.SARA_RUNS[name]['text']}):")
+        print(f"    fragments on ground {len(s['fragments'])}, mass {s['impact_mass_kg']:.2f} kg, "
+              f"A_c SARA {s['casualty_area_m2']:.6f} m^2, E_c SARA {s['ec']:.5e} "
+              f"(limit {params.CASUALTY_RISK_LIMIT:.0e}, ESSB 5.5b: "
+              f"{'OK' if s['ec'] < params.CASUALTY_RISK_LIMIT else 'NOT compliant'})")
+        for fr in s["fragments"]:
+            ac = casualty.casualty_area(fr["cross_section_m2"])
+            ours = f", E_c ours {rho_eff * ac:.5e}" if rho_eff is not None else ""
+            print(f"    {fr['name']:16s} {fr['mass_kg']:.2f} kg, A_i {fr['cross_section_m2']:.6f} m^2, "
+                  f"A_c SARA {fr['casualty_area_m2']:.6f} / ours {ac:.6f} m^2, E_c SARA {fr['ec']:.5e}{ours}, "
+                  f"impact energy {fr['energy_j']:.0f} J")
+        if s["casualty_area_m2"] > 0:
+            print(f"    rho_eff = E_c / A_c: SARA {s['ec'] / s['casualty_area_m2'] * 1e6:.4f} /km^2"
+                  + (f", ours {rho_eff * 1e6:.4f} /km^2" if rho_eff is not None else ""))
+
+    years_rho = {}
+    if have_pop:
+        for year in params.POPULATION_YEARS_SWEEP:
+            lat_deg, rho = casualty.read_population_1d(params.SARA_POPULATION_1D_PATH, year)
+            years_rho[year] = casualty.effective_density(lat_deg, rho, params.REENTRY_INC_DEG)
+        print("  rho_eff vs population year (sensitivity, re-entries span ~2025-2045): "
+              + ", ".join(f"{y} {r * 1e6:.2f}" for y, r in years_rho.items()) + " /km^2")
+
+    configs = dict(results)
+    configs.update({label: o for label, o in cost["outputs"].items() if label.startswith("d)")})
+    residual = end_of_life_tables(params.ALT_KM * 1e3)["moderate"]["residual_s"]
+    risk_cases = {name: s["ec"] for name, s in sara.items()}
+    n_runs = next(iter(configs.values()))["n_launched"].shape[0]
+    print(f"Constellation casualty risk, {params.SIM_DURATION_YEARS:.0f} yr, {n_runs} runs, mean (5-95 %); "
+          f"re-entries: committed = all satellites reaching orbit, horizon = re-entered within the "
+          f"horizon (moderate activity, p_manoeuvre {params.DISPOSAL_PROB_REF}); launch failures excluded:")
+    rows = {}
+    for label, out in configs.items():
+        counts = reentry_counts(out, residual, params.DISPOSAL_PROB_REF)
+        rows[label] = {"counts": counts, "risk": {}}
+        print(f"  {label}: re-entries committed {mean_5_95(counts['committed'])}, "
+              f"within horizon {mean_5_95(counts['horizon'])}")
+        for case, ec in risk_cases.items():
+            for kind in ("committed", "horizon"):
+                expected, p_one = casualty.constellation_risk(counts[kind], ec)
+                rows[label]["risk"][(case, kind)] = (expected, p_one)
+                if ec > 0:
+                    print(f"    {case:10s} {kind:9s}: sum E_c {sci_5_95(expected)}, "
+                          f"P(>= 1 casualty) {sci_5_95(p_one)}")
+                elif kind == "committed":
+                    print(f"    {case:10s}: E_c = 0 per re-entry (full demise) -> 0")
+    n_sats = params.N_PLANES * params.N_SLOTS
+    print(f"  Large constellations (>= {params.LARGE_CONST_MIN_SATS} satellites, ESSB 3.2.25, TO VERIFY): "
+          f"limit {params.CASUALTY_RISK_LIMIT_LARGE_CONST:.0e} per re-entry (5.5d.1) NOT applicable to the "
+          f"reference Walker ({n_sats} satellites) nor to IRIDE Eaglet II (24); for information only.")
+    if "components" in sara and years_rho:
+        plot_casualty(sara["components"], years_rho, rows, os.path.join(FIG_DIR, "casualty_risk.png"))
+    return {"sara": sara, "rho_eff": rho_eff, "rho_years": years_rho, "rows": rows}
+
+
+def plot_casualty(sara_comp, years_rho, rows, path):
+    """(a) E_c of one re-entry vs population year; (b) expected casualties per configuration."""
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    years = np.array(list(years_rho))
+    ec_years = np.array(list(years_rho.values())) * sara_comp["casualty_area_m2"]
+    ax1.semilogy(years, ec_years, "o-", color="C0", label="components case, our rho_eff x A_c")
+    ax1.semilogy([params.POPULATION_YEAR], [sara_comp["ec"]], "x", color="k", markersize=10,
+                 label="DRAMA SARA run")
+    ax1.axhline(params.CASUALTY_RISK_LIMIT, color="k", linestyle="--", label="ESSB 5.5b limit 1e-4")
+    ax1.axhline(params.CASUALTY_RISK_LIMIT_LARGE_CONST, color="gray", linestyle=":",
+                label="large-constellation limit 1e-6 (not applicable)")
+    ax1.set_xticks(years)
+    ax1.set_xlabel("Population year (UN WPP 2022 medium variant)")
+    ax1.set_ylabel("Casualty risk of one re-entry E_c [-]")
+    ax1.set_title(f"(a) One re-entry, i = {params.REENTRY_INC_DEG} deg (base case: E_c = 0)")
+    ax1.legend(fontsize=8, loc="upper right", bbox_to_anchor=(1.0, 0.9))
+    labels = list(rows)
+    y = np.arange(len(labels))
+    for kind, color, dy in (("committed", "C0", -0.15), ("horizon", "C1", 0.15)):
+        expected = [rows[lb]["risk"][("components", kind)][0] for lb in labels]
+        mid = np.array([np.median(e) for e in expected]) * 1e4  # median: always inside 5-95 %
+        lo = mid - np.array([np.percentile(e, 5) for e in expected]) * 1e4
+        hi = np.array([np.percentile(e, 95) for e in expected]) * 1e4 - mid
+        text = ("committed: all satellites reaching orbit" if kind == "committed"
+                else f"re-entered within {params.SIM_DURATION_YEARS:.0f} yr")
+        ax2.errorbar(mid, y + dy, xerr=[lo, hi], fmt="o", color=color, capsize=3, label=text)
+    ax2.set_yticks(y)
+    ax2.set_yticklabels(labels, fontsize=8)
+    ax2.invert_yaxis()
+    ax2.set_xlim(left=0)
+    ax2.set_xlabel(f"Expected casualties, sum of E_c of the re-entries [x 1e-4]")
+    ax2.set_title("(b) Constellation, components case (median, 5-95 %)", fontsize=11)
+    ax2.legend(fontsize=8)
+    for ax in (ax1, ax2):
+        ax.grid(True, which="both", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Constellation lifecycle simulator, nominal case")
     parser.add_argument("--full", action="store_true",
@@ -1734,6 +1893,9 @@ def main():
 
     print("End of life and debris indicators (v0.3)")
     debris_study(cost)
+
+    print("On-ground casualty risk of the re-entries (v0.3, DRAMA SARA)")
+    casualty_study(results, cost)
 
     if args.trade:
         print("Altitude trade-off (v0.3): launch rate vs debris indicators")
