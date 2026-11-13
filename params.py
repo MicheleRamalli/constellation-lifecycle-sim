@@ -126,16 +126,16 @@ CADENCE_GRID_DAYS_PER_SAT = (90, 590, 20)  # sweep of T/k per plane [days]: star
 SEEDS_CHECK = (43, 44)                     # extra seeds to check the sensitivity of T*
 
 # --- Earth constants (coverage.py) ---
-MU_EARTH = 3.986004418e14   # gravitational parameter [m^3/s^2], WGS84 (to be checked on the reference)
-R_EARTH = 6378137.0         # equatorial radius [m], WGS84 (to be checked on the reference)
-OMEGA_EARTH = 7.292115e-5   # Earth rotation rate [rad/s], WGS84 (to be checked on the reference)
-R_EARTH_POLAR = 6356752.3142  # polar radius [m], WGS84 (to be checked on the reference); only
+MU_EARTH = 3.986004418e14   # gravitational parameter [m^3/s^2], WGS84 (NIMA TR8350.2, 3rd ed., 2000)
+R_EARTH = 6378137.0         # equatorial radius [m], WGS84 (NIMA TR8350.2)
+OMEGA_EARTH = 7.292115e-5   # Earth rotation rate [rad/s], WGS84 (NIMA TR8350.2)
+R_EARTH_POLAR = 6356752.3142  # polar radius [m], WGS84 (NIMA TR8350.2); only
                               # for the oblateness estimate in the OSCAR comparison (main.py)
 G0 = 9.80665                # standard gravity [m/s^2] (conventional value, CGPM 1901), rocket equation
 J2_EARTH = 1.08263e-3       # second zonal harmonic [-], Vallado, Fundamentals of Astrodynamics
-                            # and Applications, 4th ed. 2013 (to be checked on the reference)
-TROPICAL_YEAR_DAYS = 365.2422  # tropical year [days], sets the sun-synchronous RAAN rate
-                               # (to be checked on the reference)
+                            # and Applications, 4th ed. 2013 (standard value)
+TROPICAL_YEAR_DAYS = 365.2422  # mean tropical year [days] (standard value), sets the
+                               # sun-synchronous RAAN rate
 
 # --- Reference Walker constellation (coverage.py) ---
 # Circular sun-synchronous orbit, inclination from the J2 condition (coverage.sso_inclination).
@@ -257,7 +257,7 @@ POPULATION_YEARS_SWEEP = (2025, 2030, 2035, 2040, 2045)  # sensitivity: span of 
 
 # --- Eaglet II satellite (decay.py) ---
 # Mass: ESA, 31/03/2026 (~25 kg), https://www.esa.int/Applications/Observing_the_Earth/IRIDE/
-# Eight_more_satellites_added_to_IRIDE_space_programme (to be checked that this is the 31/03/2026 article)
+# Eight_more_satellites_added_to_IRIDE_space_programme
 EAGLET_MASS_KG = 25.0
 EAGLET_BOX_M = (0.5, 0.4, 0.3)  # ASSUMPTION: box "the size of a microwave oven" (ESA); no published
                                 # dimensions. Mean area of a tumbling convex body = surface / 4

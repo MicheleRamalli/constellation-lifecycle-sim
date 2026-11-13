@@ -3,12 +3,12 @@
 Model:
 - Circular orbits, two-body + J2 secular rates of RAAN and argument of
   latitude u = omega + M (Vallado, Fundamentals of Astrodynamics and
-  Applications, 4th ed. 2013; to be checked on the reference).
+  Applications, 4th ed. 2013).
 - Spherical Earth rotating at OMEGA_EARTH; Greenwich angle 0 at t = 0.
 - A ground point is accessed when its angular distance from the sub-satellite
   point is <= lambda, the Earth central angle of the sensor footprint
   (Wertz & Larson, Space Mission Analysis and Design, 3rd ed., space mission
-  geometry; to be checked on the reference).
+  geometry).
 - Revisit (gap) = time from the end of one useful access to the start of the
   next. Entry/exit times are interpolated where the angular distance crosses
   lambda (parabola through three samples). A useful access is a continuous

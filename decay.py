@@ -7,7 +7,7 @@ Model (physical principle, energy balance):
 The orbit stays circular (drag acts along the velocity, eccentricity neglected).
 
 Atmosphere: piecewise exponential (exponential atmosphere model of Vallado, Fundamentals
-of Astrodynamics and Applications, 4th ed., 2013; section to be checked), rho(h) = rho_i exp(-(h - h_i) / H_i) for
+of Astrodynamics and Applications, 4th ed., 2013), rho(h) = rho_i exp(-(h - h_i) / H_i) for
 h_i <= h < h_(i+1). Here the scale height of each band comes from the densities at its
 two nodes, H_i = (h_(i+1) - h_i) / ln(rho_i / rho_(i+1)), so rho is continuous and
 passes exactly through the table values. The table values (low / moderate / high

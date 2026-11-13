@@ -11,8 +11,7 @@ TLE format (fixed columns, 1-based, as in the CelesTrak / NORAD documentation):
 
 The TLE mean motion is the SGP4 (Kozai) mean motion. The Brouwer mean motion and
 semi-major axis are recovered with Hoots F.R., Roehrich R.L. (1980), "Spacetrack
-Report No. 3: Models for propagation of NORAD element sets" (to be checked on
-the reference). Here with the WGS84 constants of params.py (SGP4 itself uses
+Report No. 3: Models for propagation of NORAD element sets". Here with the WGS84 constants of params.py (SGP4 itself uses
 WGS72; the difference on a is far below a metre-level concern for this use).
 No SGP4 propagation: the elements are only used at their epoch, propagated with
 the J2 secular rates of coverage.py where needed.
