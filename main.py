@@ -43,17 +43,30 @@ Second scenario: IRIDE Eaglet II, planes reconstructed from the derived TLE tabl
 (inputs/iride_eaglet2_elements.csv, written by fetch_tle.py; planes.py).
 
 Usage:
-    python main.py          fast mode (default): the check of T* with the extra seeds
-                            params.SEEDS_CHECK is skipped and the altitude trade-off is not
-                            run; every other result is identical
-    python main.py --full   also runs the T* check with the extra seeds
+    python main.py          fast mode (default): N_RUNS_FAST Monte Carlo runs instead of
+                            N_RUNS / N_RUNS_SWEEP, no check of T* with the extra seeds
+                            params.SEEDS_CHECK: numbers APPROXIMATE, same models and figures
+    python main.py --full   numbers of the report: N_RUNS / N_RUNS_SWEEP runs and the T* check
+                            with the extra seeds
     python main.py --trade  also runs the altitude trade-off (altitude_trade.png)
     python main.py --reliability  also runs the reliability sensitivity (Small-category Weibull,
                             Dubos et al. 2009) at ALT_KM with the reference Walker
-    Run time on the development laptop (2026-11-11): default ~8 min, --trade ~53 min
-    (solar cycle tables at 700-800 km take most of the extra time).
-    --full adds ~4 min (measured before v0.3, not re-measured).
-    --reliability adds ~7 min (measured 2026-11-13: default + --reliability = 14.8 min).
+    Run time on the development laptop (measured 2026-11-13, Python 3.15.2, coverage cache
+    data/*.npz present as in the repository):
+        python main.py                            5.1 min
+        python main.py --reliability             11.8 min   (+6.7)
+        python main.py --trade                   15.9 min   (+10.8) *
+        python main.py --reliability --trade     22.6 min
+        python main.py --full                    14.6 min
+        python main.py --full --reliability      28.1 min   (+13.5) *
+        python main.py --full --trade            38.8 min   (+24.3)
+    Read from per-line timestamps of complete runs (--reliability --trade, --full --trade,
+    --full --reliability --trade): a run without a flag ends where that flag's section starts.
+    * = sum of sections taken from two different runs.
+    About 3 min of the fast default do not depend on the number of runs (solar cycle tables,
+    decay, coverage post-processing). Without data/revisit_table.npz and data/iride_coverage.npz
+    the coverage tables are rebuilt once: ~20-30 min more.
+    Tests: pytest (~1 min); end-to-end run without the DRAMA files: pytest -m slow (~5 min).
     To follow the progress when the output goes to a file: python -u main.py > run.log
 """
 
@@ -84,6 +97,8 @@ from reliability import reliability_analytic
 from search import bisect_interval, search_max_interval
 
 FIG_DIR = "figures"
+ATM_LABELS = {"nrlmsise": "NRLMSISE-00", "jb2006": "JB-2006"}  # model names for the figures
+N_RUNS_REPORT = params.N_RUNS  # runs of the report (--full); main() lowers params.N_RUNS in fast mode
 COVERAGE_CACHE = os.path.join("data", "revisit_table.npz")
 DAY_S = params.SECONDS_PER_DAY
 YEAR_S = params.SECONDS_PER_YEAR
@@ -142,18 +157,20 @@ def hours(x_s):
 # Constellation runs
 # ---------------------------------------------------------------------------
 
-def run_strategy(strategy, order_to_launch_days, n_runs=params.N_RUNS, seed=params.SEED,
+def run_strategy(strategy, order_to_launch_days, n_runs=None, seed=params.SEED,
                  scenario=REFERENCE):
     """Strategies a/b/c/b+c on every plane: one launch per plane at its launch date.
 
     Inputs:
         strategy             : dict with n_spares, reorder_level, pre_order_retirement
         order_to_launch_days : order-to-launch time [days]
-        n_runs, seed         : Monte Carlo runs and master seed
+        n_runs, seed         : Monte Carlo runs (default params.N_RUNS) and master seed
         scenario             : REFERENCE or the IRIDE scenario (slots, launch dates, tables;
                                optional "reliability", default RELIABILITY)
     Output: constellation output (lifecycle.simulate_constellation)
     """
+    if n_runs is None:   # read at call time: main() lowers it in the fast mode
+        n_runs = params.N_RUNS
     inputs = []
     for t_launch_s in scenario["plane_launch_s"]:
         inputs.append(dict(
@@ -311,9 +328,10 @@ def plot_availability_vs_order_time(sweeps, path):
                  label=f"{label}: MC mean")
         ax2.fill_between(ORDER_SWEEP_DAYS, sw["con_p5"], sw["con_p95"],
                          color=line.get_color(), alpha=0.15)
-    ax1.set_title("(a) Mean fraction of occupied slots per plane after deployment")
-    ax2.set_title(f"(b) Constellation availability ({REVISIT_REQS['max']['text']} at "
-                  f"{params.REVISIT_LAT_DEG:.0f} deg N), band 5-95 %")
+    ax1.set_title("(a) Slot availability per plane after deployment\n(mean fraction of occupied slots)",
+                  fontsize=10)
+    ax2.set_title(f"(b) Constellation availability, {REVISIT_REQS['max']['text']} at "
+                  f"{params.REVISIT_LAT_DEG:.0f} deg N\n(MC mean, band 5-95 %)", fontsize=10)
     for ax in (ax1, ax2):
         ax.set_xlabel("Order-to-launch time [days]")
         ax.set_ylabel("Availability [-]")
@@ -542,7 +560,7 @@ def equivalent_rows(rows, best, req):
 def plot_cost_vs_availability(d_curves, d_best, rows, ref_rate, path):
     """Launch rate vs fraction of runs meeting the criterion, one panel per revisit requirement."""
     markers = {0: "s", 1: "D", 2: "^", 3: "v"}
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5), sharey=True)
+    fig, axes = plt.subplots(1, 2, figsize=(14, 7.5), sharey=True)
     for ax, (req, spec) in zip(axes, REVISIT_REQS.items()):
         for k, curve in d_curves.items():
             order = np.argsort(curve["rate"])
@@ -564,7 +582,7 @@ def plot_cost_vs_availability(d_curves, d_best, rows, ref_rate, path):
                      f"{params.REVISIT_LAT_DEG:.0f} deg N", fontsize=10)
         ax.set_xlim(0.75 * ref_rate, 1.8 * ref_rate)  # the comparison is around the reference rate
         ax.grid(True, alpha=0.3)
-        ax.legend(fontsize=7, loc="lower right")
+        ax.legend(fontsize=7, loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=2)  # below the axes
     axes[0].set_ylabel(f"Fraction of runs with availability >= {params.AVAIL_TARGET} [-]")
     axes[0].set_ylim(-0.02, 1.02)
     fig.suptitle(f"Cost vs availability | Walker {params.N_PLANES}/{params.N_SLOTS}, "
@@ -650,7 +668,7 @@ def plot_revisit_vs_latitude(data, path):
 
 def plot_revisit_table(data, path):
     """Lookup table revisit(n_1, n_2) as two annotated grids (max and mean)."""
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
+    fig, axes = plt.subplots(1, 2, figsize=(11, 5.2))
     for ax, (key, title, limit_h) in zip(axes, [
             ("table_planes_max_s", "(a) Max revisit [h]", params.REVISIT_MAX_HOURS),
             ("table_planes_mean_s", "(b) Mean revisit [h]", params.REVISIT_MEAN_HOURS)]):
@@ -668,11 +686,11 @@ def plot_revisit_table(data, path):
                         color="k" if light else "w", fontweight="bold" if ok else "normal")
         ax.set_xlabel("n_2 operational in plane 2 [-]")
         ax.set_ylabel("n_1 operational in plane 1 [-]")
-        ax.set_title(f"{title}; bold = meets <= {limit_h:.0f} h")
-        fig.colorbar(im, ax=ax)
+        ax.set_title(f"{title}; bold = meets <= {limit_h:.0f} h", fontsize=10)
+        fig.colorbar(im, ax=ax, label="Revisit [h]")
     fig.suptitle(f"Revisit at {params.REVISIT_LAT_DEG:.0f} deg N vs operational satellites per plane "
                  "(R1 rephasing, quasi-stationary)", fontsize=10)
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0, 1, 0.95))  # leave room for the suptitle
     fig.savefig(path, dpi=150)
     plt.close(fig)
 
@@ -865,13 +883,13 @@ def plot_decay(tables, b, alt_sat_m, observed, path):
         for level, color in zip(params.SOLAR_ACTIVITY_LEVELS, ("C0", "C1", "C3")):
             t_years = {f: np.array([decay.lifetime(h, params.DECAY_END_ALT_KM * 1e3, alt_m, rho[level], b * f)
                                     for h in alt0_m]) / YEAR_S for f in params.EAGLET_AREA_FACTORS}
-            ax1.plot(alt0_m / 1e3, t_years[1.0], style, color=color, label=f"{model}, {level}")
+            ax1.plot(alt0_m / 1e3, t_years[1.0], style, color=color, label=f"{ATM_LABELS[model]}, {level}")
             if model == params.ATM_MODEL:
                 ax1.fill_between(alt0_m / 1e3, t_years[min(params.EAGLET_AREA_FACTORS)],
                                  t_years[max(params.EAGLET_AREA_FACTORS)], color=color, alpha=0.12)
             rate = decay.decay_rate(coverage.R_E + alt_plot_m,
                                     decay.density(alt_plot_m, alt_m, rho[level]), b) * DAY_S
-            ax2.plot(alt_plot_m / 1e3, -rate, style, color=color, label=f"{model}, {level}")
+            ax2.plot(alt_plot_m / 1e3, -rate, style, color=color, label=f"{ATM_LABELS[model]}, {level}")
     ax1.axhline(params.LEO_LIFETIME_LIMIT_YEARS, color="r", linestyle="--", lw=1,
                 label=f"{params.LEO_LIFETIME_LIMIT_YEARS:.0f} yr (ESSB-ST-U-007 5.4.2.3a.1)")
     ax1.set_yscale("log")
@@ -885,9 +903,10 @@ def plot_decay(tables, b, alt_sat_m, observed, path):
     ax2.set_xlabel("Altitude [km]")
     ax2.set_ylabel("Decay rate -da/dt [m/day]")
     ax2.set_title("(b) Decay rate: TLE vs model (area x 1)", fontsize=10)
+    ax1.legend(fontsize=7)
+    ax2.legend(fontsize=7, ncol=2, loc="center", bbox_to_anchor=(0.5, 0.35))  # empty band between the curves
     for ax in (ax1, ax2):
         ax.grid(True, which="both", alpha=0.3)
-        ax.legend(fontsize=7)
     fig.suptitle("Orbital decay by drag, densities ECSS-E-ST-10-04C Rev.1 Annex G", fontsize=10)
     fig.tight_layout()
     fig.savefig(path, dpi=150)
@@ -1195,8 +1214,10 @@ def plot_solar_cycle(scen, cyc, alt_op_m, const, path):
     for name, s in scen.items():
         lo, hi = s["range_months"]
         k = np.arange(int(lo), int(hi) + 1)
+        short = {"strong cycle": "strong cycle (ECSS Table A-1, cycle 23)",
+                 WEAK: "ESA forecast 2021 (weak cycle 25)"}   # sources in the report
         ax1.plot((k - lo) * s["step_s"] / YEAR_S, s["f107"][k % len(s["f107"])], color=colors[name],
-                 label=f"{name}: {s['source']}")
+                 label=short.get(name, name))
     for f, lv in zip(params.SOLAR_F107_NODES, params.SOLAR_ACTIVITY_LEVELS):
         ax1.axhline(f, color="gray", linestyle=":", lw=1)
         ax1.text(11.6, f + (3 if f > 70 else -9), f"ECSS {lv} ({f:.0f})", fontsize=7, color="gray",
@@ -1205,7 +1226,7 @@ def plot_solar_cycle(scen, cyc, alt_op_m, const, path):
     ax1.set_xlabel("Years from the start of the cycle")
     ax1.set_ylabel("F10.7 [sfu]")
     ax1.set_title("(a) Solar activity scenarios (one cycle)", fontsize=10)
-    ax1.legend(fontsize=7, loc="upper left")
+    ax1.legend(fontsize=8, loc="upper right")
     styles = {debris.FAILED: ("-", f"failed at {alt_op_m / 1e3:.0f} km"),
               debris.DISPOSED: ("--", f"disposed at {params.DISPOSAL_ALT_KM:.0f} km")}
     for name, tab in cyc.items():
@@ -1222,7 +1243,7 @@ def plot_solar_cycle(scen, cyc, alt_op_m, const, path):
     ax2.axhline(params.LEO_LIFETIME_LIMIT_YEARS, color="k", linestyle="--", label="ESSB 5-yr limit")
     ax2.set_xlabel("Phase of the end of life [years from the start of the cycle]")
     ax2.set_ylabel(f"Residual lifetime to {params.DECAY_END_ALT_KM:.0f} km [yr]")
-    ax2.set_title(f"(b) Eaglet II, {params.ATM_MODEL}, ln(rho) interpolated in F10.7", fontsize=10)
+    ax2.set_title(f"(b) Eaglet II, {ATM_LABELS[params.ATM_MODEL]}, ln(rho) interpolated in F10.7", fontsize=10)
     ax2.legend(fontsize=7, loc="upper left", bbox_to_anchor=(1.01, 1.0))
     for ax in (ax1, ax2):
         ax.grid(True, which="both", alpha=0.3)
@@ -1637,12 +1658,14 @@ CYCLE_STYLE = {"strong cycle": ("s--", "tab:brown"), WEAK: ("D--", "tab:green")}
 
 
 def mark_lower_bounds(ax, rows, name, values, color):
-    """Open marker and '>=' where the forecast ended before the re-entry (lower bound)."""
+    """Open circle where the forecast ended before the re-entry (value is a lower bound).
+
+    The meaning goes in the legend (one entry per axis), not as text next to the points."""
+    label = "open circle: lower bound (forecast ends 2129)"
     for r, v in zip(rows, values):
         if r[f"censored_{name}"]:
-            ax.plot(r["alt_km"], v, "o", ms=12, mfc="none", color=color)
-            ax.annotate(">= (forecast ends 2129)", (r["alt_km"], v), textcoords="offset points",
-                        xytext=(-6, -14), ha="right", fontsize=7, color=color)
+            ax.plot(r["alt_km"], v, "o", ms=12, mfc="none", color=color, label=label)
+            label = None
 
 
 def plot_altitude_trade(rows, path, cycles=()):
@@ -1658,14 +1681,14 @@ def plot_altitude_trade(rows, path, cycles=()):
     tie_label = f"equivalent to the requirement ({params.MC_CI_LEVEL:.0%} binomial interval)"
     for r in rows:
         ax.annotate(f"Walker {'/'.join(map(str, r['walker']))}\n{short_label(r['label'])}",
-                    (r["alt_km"], r["rate"]), textcoords="offset points", xytext=(0, 8),
-                    ha="center", fontsize=7)
+                    (r["alt_km"], r["rate"]), textcoords="offset points", xytext=(5, 6),
+                    ha="left", fontsize=7)  # above-right: free of the line on both sides
         for label, rate in r["equivalent"]:  # no single winner at this altitude
             ax.plot(r["alt_km"], rate, "o", mfc="none", color="k", label=tie_label)
             ax.annotate(short_label(label), (r["alt_km"], rate), textcoords="offset points",
                         xytext=(0, -12), ha="center", fontsize=7)
             tie_label = None  # one legend entry only
-    ax.margins(x=0.12, y=0.2)  # room for the text above and below the points
+    ax.margins(x=0.18, y=0.2)  # room for the text above and below the points
     ax.legend(fontsize=7, loc="upper right")
     ax.set_ylabel("Launch rate [satellites/yr]")
     ax.set_title("(a) Smallest Walker and cheapest strategy (max revisit)")
@@ -1679,6 +1702,7 @@ def plot_altitude_trade(rows, path, cycles=()):
         mark_lower_bounds(ax, rows, name, [r[f"life_failed_{name}"].mean() for r in rows], c)
     ax.axhline(params.LEO_LIFETIME_LIMIT_YEARS, color="k", linestyle="--", label="ESSB 5-yr limit")
     ax.set_ylabel("Residual lifetime of a failed satellite [yr]")
+    ax.set_ylim(top=3e4)  # room for the legend above the curves
     ax.set_title("(b) Natural decay from the operational altitude")
     ax = axes[1, 0]
     for lv, c in zip(levels, colors):
@@ -1688,6 +1712,7 @@ def plot_altitude_trade(rows, path, cycles=()):
         ax.semilogy(alt, [r[f"objyr_{name}"] for r in rows], marker, color=c, label=name)
         mark_lower_bounds(ax, rows, name, [r[f"objyr_{name}"] for r in rows], c)
     ax.set_ylabel("Dead object-years per run (committed)")
+    ax.set_ylim(top=3e4)  # room for the legend above the curves
     ax.set_title(f"(c) Objects left in {params.SIM_DURATION_YEARS:.0f} yr, p_manoeuvre = "
                  f"{params.DISPOSAL_PROB_REF}")
     ax = axes[1, 1]
@@ -1964,14 +1989,17 @@ def reliability_study(results, cost, full):
 def main():
     parser = argparse.ArgumentParser(description="Constellation lifecycle simulator, nominal case")
     parser.add_argument("--full", action="store_true",
-                        help="also check T* of strategy d) with the extra seeds (slower)")
+                        help="numbers of the report: all Monte Carlo runs and the T* seed check (slower)")
     parser.add_argument("--trade", action="store_true",
                         help="also run the altitude trade-off (slower)")
     parser.add_argument("--reliability", action="store_true",
                         help="also run the reliability sensitivity (Small-category Weibull)")
     args = parser.parse_args()
     full = args.full
-    print("Mode: full" if full else "Mode: fast (use --full for the T* seed check)")
+    print(mode_text(full))
+    if not full:   # fast mode: fewer runs everywhere (read at call time from params)
+        params.N_RUNS = params.N_RUNS_FAST
+        params.N_RUNS_SWEEP = params.N_RUNS_FAST
     os.makedirs(FIG_DIR, exist_ok=True)
 
     print("Coverage of the reference Walker constellation")
@@ -2016,6 +2044,17 @@ def main():
     else:
         print("Altitude trade-off skipped, run with --trade (altitude_trade.png not updated)")
     print(f"Figures saved in {FIG_DIR}/")
+    print(mode_text(full))
+
+
+def mode_text(full):
+    """One line on the run mode, printed at the start and at the end of main()."""
+    if full:
+        return (f"Mode: full ({params.N_RUNS} Monte Carlo runs, T* checked with seeds "
+                f"{params.SEED}, {', '.join(str(s) for s in params.SEEDS_CHECK)}): numbers of the report")
+    return (f"Mode: FAST ({params.N_RUNS_FAST} Monte Carlo runs instead of {N_RUNS_REPORT}, no T* seed "
+            "check): numbers APPROXIMATE (wider binomial intervals, T* may differ by a few days); "
+            "run with --full for the numbers of the report")
 
 
 if __name__ == "__main__":

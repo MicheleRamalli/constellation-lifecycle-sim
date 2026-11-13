@@ -368,8 +368,9 @@ CYCLE25_START_ECSS_ONLY = "2020-06-01"  # 2008-12-01 + 140 x 30 days (sensitivit
 # general case: ASSUMPTION uniform over one cycle, one draw per Monte Carlo run (launch date
 # unknown with respect to the cycle); strong cycle 0-140 months; ESA forecast 2021 from the start
 # of cycle 25 to the next minimum of the forecast (found in the file).
-# IRIDE case: first launch of the Eaglet II satellites 2025-11-28 (date given by the user,
-# TO VERIFY with a public launch record).
+# IRIDE case: first launch of the Eaglet II satellites 2025-11-28. Source: ASI, "IRIDE - Satellite
+# Constellation for Earth Observation", https://www.asi.it/en/?p=62498: 8 Eaglet II launched on
+# 28 November 2025, SpaceX Falcon 9, Transporter-15, Vandenberg.
 IRIDE_FIRST_LAUNCH = "2025-11-28"
 SOLAR_PHASE_SEED_STREAM = 8  # seed sequence [SEED, 8] of the mission start phase (separate stream)
 SOLAR_PHASE_GRID_MONTHS = 1.0  # spacing of the phase grid of the residual lifetime tables [months]
@@ -436,4 +437,7 @@ SIM_DURATION_YEARS = 15.0  # ASSUMPTION: reference mission horizon, to be review
 DT_DAYS = 1.0              # fixed time step (project rule, CLAUDE.md)
 N_RUNS = 1000              # number of Monte Carlo runs
 N_RUNS_SWEEP = 1000        # Monte Carlo runs per point of the parameter sweeps in main.py
+# N_RUNS and N_RUNS_SWEEP above are the values of the report (python main.py --full).
+N_RUNS_FAST = 200          # ASSUMPTION: runs of the default fast mode of main.py (both N_RUNS and
+                           # N_RUNS_SWEEP), a compromise run time / precision: results approximate
 SEED = 42                  # master seed of the Monte Carlo
