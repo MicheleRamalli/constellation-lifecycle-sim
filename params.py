@@ -190,24 +190,33 @@ PLANE_GROUP_SWEEP_DEG = (2.0, 5.0, 10.0)  # sensitivity of the plane grouping
 # The text read does not cite ISO 27852; for the methods it refers to ESSB-HB-U-002 and
 # ECSS-E-ST-10-04.
 LEO_LIFETIME_LIMIT_YEARS = 5.0  # 5.4.2.3a.1: orbital lifetime in LEO after end of mission < 5 yr.
-                                # Count from the end of life of each object (retirement for
-                                # the disposed ones, failure for the failed ones): TO VERIFY on ESSB
+                                # Counted from the end-of-life epoch for objects with recurrent
+                                # manoeuvre capability (from the injection epoch without it):
+                                # here retirement for the disposed ones, failure for the failed ones
 CUM_COLLISION_PROB_LIMIT = 1e-3  # 5.4.2.3a.2: cumulative collision probability with objects
                                  # > 1 cm, from end of life to re-entry (MASTER flux x area x time)
 DISPOSAL_PROB_REF = 0.9          # 5.4.1.1a: probability of successful disposal > 0.9 (includes
                                  # reliability and impacts); reference value of P_d
 DISPOSAL_PROB_SWEEP = (0.5, 0.6, 0.7, 0.8, 0.9, 1.0)  # sensitivity sweep of P_d
-CASUALTY_RISK_LIMIT = 1e-4       # 5.5b: on-ground casualty risk of a re-entry < 1e-4 (SARA)
-# Large constellations: applicability TO VERIFY (definition of large constellation)
+CASUALTY_RISK_LIMIT = 1e-4       # 5.5b: expected number of casualties per re-entry < 1e-4 (SARA)
+# Large constellations (3.2.25, at least 100 spacecraft; a "constellation" has at least 10, 3.2.8):
+# not applicable to IRIDE Eaglet II (24) nor to the reference Walker; values kept for reference.
 DISPOSAL_PROB_LARGE_CONST = 0.95        # 5.4.1.1b: probability of successful disposal > 0.95
-CASUALTY_RISK_LIMIT_LARGE_CONST = 1e-6  # 5.5d.1: casualty risk < 1e-6
-APOGEE_LIMIT_LARGE_CONST_KM = 375.0     # 5.4.2.3c: apogee < 375 km (wording TO VERIFY)
-LARGE_CONST_MIN_SATS = 100  # 3.2.25: definition of large constellation (threshold given by the
-                            # user, wording TO VERIFY on ESSB); IRIDE Eaglet II has 24 satellites
+CASUALTY_RISK_LIMIT_LARGE_CONST = 1e-6  # 5.5d.1: expected casualties per re-entry < 1e-6
+                                        # (5.5d.2: or controlled re-entry); per re-entry only,
+                                        # ESSB-ST-U-007 gives no cumulative limit
+APOGEE_LIMIT_LARGE_CONST_KM = 375.0     # 5.4.2.3c: the disposal orbit of spacecraft of a large
+                                        # constellation in the LEO protected region shall have
+                                        # an apogee below 375 km
+LARGE_CONST_MIN_SATS = 100  # 3.2.25: "group of space objects consisting of at least 100
+                            # spacecraft"; IRIDE Eaglet II has 24 satellites
 
 # --- On-ground casualty risk of the re-entries (casualty.py, v0.3) ---
-# Casualty area of a fragment A_c = (sqrt(A_h) + sqrt(A_i))^2: NASA-STD-8719.14 (Process for
-# Limiting Orbital Debris), debris casualty area with a person of 0.36 m^2 (clause TO VERIFY).
+# Casualty area of a fragment A_c = (sqrt(A_h) + sqrt(A_i))^2 with A_h = 0.36 m^2 (sqrt = 0.6 m):
+# NASA Orbital Debris Program Office, Debris Assessment Software (DAS) reentry analysis,
+# "DCA = (0.6 + sqrt(A))^2" (NASA NTRS 20130011037); requirement NASA-STD-8719.14
+# Requirement 4.7-1 (casualty risk of an uncontrolled re-entry <= 1:10000). Note: DAS takes
+# A = L*D for cylinders, SARA (and this code) the mean tumbling section surface/4.
 # DRAMA 4.1.4 SARA uses the same model: reproduced to machine precision (tests/test_casualty.py).
 CASUALTY_HUMAN_AREA_M2 = 0.36
 # Two DRAMA 4.1.4 SARA runs by the user (run mode "Reentry-risk", no Monte Carlo), Eaglet II-like
@@ -256,8 +265,9 @@ EAGLET_PROPULSION = True  # ASSUMPTION: no public source (checked ESA, ASI, OHB 
 # compared with ESSB 5.4.1.1a (which includes the system reliability). Failed manoeuvre ->
 # natural decay from the operational altitude. Successful manoeuvre -> circular orbit at
 # DISPOSAL_ALT_KM, then natural decay. Launch failures leave no object in orbit.
-DISPOSAL_ALT_KM = 375.0  # ESSB-ST-U-007 5.4.2.3c (apogee < 375 km, large constellations;
-                         # applicability to Eaglet II TO VERIFY). ASSUMPTION: instantaneous
+DISPOSAL_ALT_KM = 375.0  # ESSB-ST-U-007 5.4.2.3c (apogee < 375 km, large constellations only,
+                         # 3.2.25: not required for Eaglet II, 24 satellites; used here as a
+                         # conservative disposal orbit). ASSUMPTION: instantaneous
                          # manoeuvre, delta-v and propellant not modelled
 DRAG_COEFFICIENT = 2.2     # ASSUMPTION: common value for a compact satellite in free-molecular
                            # flow; same value as the DRAMA/OSCAR Sentinel-3B reference run
@@ -388,7 +398,7 @@ OSCAR_S3B_RUNS = {
         "perigee_km": 634.05, "lifetime_years": 14.259, "reentry": "2032-07-29 22:15:16",
         "delta_v_m_s": 92.17, "propellant_kg": 54.35},
     "ECSS cycle 23": {
-        "folder": "~/S3B_ECSS_cycle23",
+        "folder": "~/DRAMA_projects/S3B_ECSS_cycle23",
         "solar_option": "ECSS sample solar cycle (cycle 23 repeated, start 2008-12-01 in the log)",
         "solar_files": "DRAMA TOOLS/OSCAR/data/ecss.dat",
         "activity": "strong cycle",        # our Table A-1 F81mean, phase from CYCLE24_START
