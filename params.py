@@ -17,6 +17,18 @@ SECONDS_PER_YEAR = 365.25 * SECONDS_PER_DAY  # Julian year [s], IAU definition
 # R(t) is measured from the launch date.
 WEIBULL_BETA = 0.4521          # shape parameter [-] (beta < 1: infant mortality)
 WEIBULL_THETA_YEARS = 2607.0   # scale parameter [years]
+# Sensitivity case "worst reliability" (main.py --reliability): MLE Weibull of the Small
+# category (0-500 kg launch mass, section 2, Table 2; 415 of 1444 satellites).
+# Source: Dubos G.F., Castet J.-F., Saleh J.H., "Statistical reliability analysis of
+# satellites by mass category: Does spacecraft size matter?", IAC-09-D1.3.6, 60th
+# International Astronautical Congress, Daejeon, 2009, Table 3, p. 6 (conference version of
+# Acta Astronautica 67, 2010: the journal values may differ). Read on 13/11/2026 from the
+# public PDF of the Georgia Tech Space Systems Design Lab (ssdl1.gatech.edu,
+# IAC-2009-D1.3.6.pdf, no longer online); no local copy. Check: R(6 months) ~ 96.8 % for the
+# Small category (p. 5), reproduced in tests/test_reliability.py.
+# Limitation: Eaglet II (~25 kg) is far below the 500 kg upper bound of the category.
+WEIBULL_BETA_SMALL = 0.3224         # shape parameter [-]
+WEIBULL_THETA_SMALL_YEARS = 21414.5  # scale parameter [years]
 
 # --- Mission ---
 DESIGN_LIFE_YEARS = 5.0  # ASSUMPTION: reference value, to be reviewed (no source yet)

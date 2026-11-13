@@ -57,3 +57,23 @@ def test_exponential_sample_mean():
     t_fail_s = sample_failure_times(N, "exponential", rng, mttf_s=MTTF_S)
     sigma = MTTF_S / np.sqrt(N)
     assert abs(np.mean(t_fail_s) - MTTF_S) < N_SIGMA * sigma
+
+
+def test_small_category_six_months():
+    """Dubos, Castet & Saleh (IAC-09-D1.3.6, p. 5): R(6 months) ~ 96.8 % for the Small
+    category; with the Table 3 parameters R(0.5 yr) = 0.9684 (tolerance: the text gives
+    one decimal in percent, +-0.05 %)."""
+    r = reliability_analytic(0.5 * params.SECONDS_PER_YEAR, "weibull", beta=params.WEIBULL_BETA_SMALL,
+                             theta_s=params.WEIBULL_THETA_SMALL_YEARS * params.SECONDS_PER_YEAR)
+    assert r == pytest.approx(0.968, abs=0.0005)
+
+
+def test_small_category_survival_matches_analytic():
+    """Monte Carlo sampling with the Small-category parameters reproduces R(t) (4 sigma)."""
+    model = dict(beta=params.WEIBULL_BETA_SMALL,
+                 theta_s=params.WEIBULL_THETA_SMALL_YEARS * params.SECONDS_PER_YEAR)
+    t_fail_s = sample_failure_times(N, "weibull", np.random.default_rng(SEED), **model)
+    for t_s in CHECK_TIMES_S:
+        r = reliability_analytic(t_s, "weibull", **model)
+        sigma = np.sqrt(r * (1.0 - r) / N)
+        assert abs(np.mean(t_fail_s > t_s) - r) < N_SIGMA * sigma

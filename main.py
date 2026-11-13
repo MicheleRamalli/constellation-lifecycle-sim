@@ -48,9 +48,12 @@ Usage:
                             run; every other result is identical
     python main.py --full   also runs the T* check with the extra seeds
     python main.py --trade  also runs the altitude trade-off (altitude_trade.png)
+    python main.py --reliability  also runs the reliability sensitivity (Small-category Weibull,
+                            Dubos et al. 2009) at ALT_KM with the reference Walker
     Run time on the development laptop (2026-11-11): default ~8 min, --trade ~53 min
     (solar cycle tables at 700-800 km take most of the extra time).
     --full adds ~4 min (measured before v0.3, not re-measured).
+    --reliability adds ~7 min (measured 2026-11-13: default + --reliability = 14.8 min).
     To follow the progress when the output goes to a file: python -u main.py > run.log
 """
 
@@ -147,7 +150,8 @@ def run_strategy(strategy, order_to_launch_days, n_runs=params.N_RUNS, seed=para
         strategy             : dict with n_spares, reorder_level, pre_order_retirement
         order_to_launch_days : order-to-launch time [days]
         n_runs, seed         : Monte Carlo runs and master seed
-        scenario             : REFERENCE or the IRIDE scenario (slots, launch dates, tables)
+        scenario             : REFERENCE or the IRIDE scenario (slots, launch dates, tables;
+                               optional "reliability", default RELIABILITY)
     Output: constellation output (lifecycle.simulate_constellation)
     """
     inputs = []
@@ -160,7 +164,8 @@ def run_strategy(strategy, order_to_launch_days, n_runs=params.N_RUNS, seed=para
             commissioning_s=params.COMMISSIONING_DAYS * DAY_S,
             design_life_s=params.DESIGN_LIFE_YEARS * YEAR_S,
             launch_success_prob=params.LAUNCH_SUCCESS_PROB,
-            sats_per_launch=params.SATS_PER_LAUNCH, reliability=RELIABILITY, **strategy))
+            sats_per_launch=params.SATS_PER_LAUNCH,
+            reliability=scenario.get("reliability", RELIABILITY), **strategy))
     return simulate_constellation(simulate_plane, inputs, seed)
 
 
@@ -187,7 +192,8 @@ def run_cadence(k, interval_days, seed, n_runs, scenario=REFERENCE):
             initial_launch_s=np.full(n_slots + k, t_launch_s),
             commissioning_s=params.COMMISSIONING_DAYS * DAY_S,
             design_life_s=params.DESIGN_LIFE_YEARS * YEAR_S,
-            launch_success_prob=params.LAUNCH_SUCCESS_PROB, reliability=RELIABILITY))
+            launch_success_prob=params.LAUNCH_SUCCESS_PROB,
+            reliability=scenario.get("reliability", RELIABILITY)))
     return simulate_constellation(simulate_fixed_cadence, inputs, seed)
 
 
@@ -375,7 +381,8 @@ def steady_rate_pre_order(n_spares, scenario=REFERENCE):
     """
     order_s = params.ORDER_TO_LAUNCH_DAYS * DAY_S
     a_s = params.DESIGN_LIFE_YEARS * YEAR_S - order_s - params.COMMISSIONING_DAYS * DAY_S
-    integral_s = YEAR_S * quad(lambda ty: reliability_analytic(ty * YEAR_S, **RELIABILITY),
+    rel = scenario.get("reliability", RELIABILITY)
+    integral_s = YEAR_S * quad(lambda ty: reliability_analytic(ty * YEAR_S, **rel),
                                0.0, a_s / YEAR_S, limit=200)[0]
     n_planes = len(scenario["plane_launch_s"])
     return n_planes * (scenario["n_slots"] + n_spares) / (order_s + integral_s) * YEAR_S
@@ -409,7 +416,7 @@ def cost_study(full, scenario=REFERENCE, plot=True):
     """
     n_planes, n_slots = len(scenario["plane_launch_s"]), scenario["n_slots"]
     ref_rate = n_planes * reference_launch_rate(
-        n_slots, RELIABILITY, params.DESIGN_LIFE_YEARS * YEAR_S,
+        n_slots, scenario.get("reliability", RELIABILITY), params.DESIGN_LIFE_YEARS * YEAR_S,
         params.COMMISSIONING_DAYS * DAY_S) * YEAR_S
     print(f"{scenario['name']}: reference rate P N / E[up] = {ref_rate:.3f} satellites/yr "
           "(every satellite gives its whole useful life, no gaps)")
@@ -1856,12 +1863,112 @@ def plot_casualty(sara_comp, years_rho, rows, path):
     plt.close(fig)
 
 
+# ---------------------------------------------------------------------------
+# Reliability sensitivity (v0.3): nominal Weibull vs Small-category Weibull
+# ---------------------------------------------------------------------------
+
+RELIABILITY_SMALL = {"model": "weibull", "beta": params.WEIBULL_BETA_SMALL,
+                     "theta_s": params.WEIBULL_THETA_SMALL_YEARS * YEAR_S}
+
+
+def reliability_numbers(rel):
+    """R(6 months), R(design life) and expected operational life up to the design life.
+
+    Output: dict "r_half" [-], "r_dl" [-], "life_yr" = integral_0^DL R dt [yr]
+    """
+    dl_yr = params.DESIGN_LIFE_YEARS
+    return {"r_half": float(reliability_analytic(0.5 * YEAR_S, **rel)),
+            "r_dl": float(reliability_analytic(dl_yr * YEAR_S, **rel)),
+            "life_yr": quad(lambda ty: reliability_analytic(ty * YEAR_S, **rel), 0.0, dl_yr, limit=200)[0]}
+
+
+def criterion_with_ci(out, scenario):
+    """Fraction of runs meeting AVAIL_TARGET and its binomial interval, per requirement."""
+    result = {}
+    for req in REVISIT_REQS:
+        avail = availability(out, req, scenario)
+        n_ok = int(np.sum(avail >= params.AVAIL_TARGET))
+        result[req] = (n_ok / len(avail), *binomial_interval(n_ok, len(avail), params.MC_CI_LEVEL))
+    return result
+
+
+def ranking_text(cost, req):
+    """Cheapest configuration meeting the criterion and the statistically equivalent ones."""
+    best = cost["cheapest"][req]
+    if best is None:
+        return "none of the configurations meets the criterion"
+    text = f"{best['label']} ({best['rate']:.3f} sats/yr)"
+    others = [r["label"] for r in cost["equivalent"][req] if r["label"] != best["label"]]
+    if others:
+        text += "; not a single winner, equivalent: " + ", ".join(others)
+    return text
+
+
+def reliability_study(results, cost, full):
+    """Does the ranking of the strategies change with a less reliable satellite?
+
+    Same model, same seeds (common random numbers), only the Weibull parameters change:
+    nominal (Castet & Saleh 2009, all masses) vs Small category 0-500 kg (Dubos et al. 2009).
+    Inputs: outputs of the four strategies and cost_study of the nominal case, --full flag
+    Output: dict {case: {"numbers", "strategies", "cost", "reentries"}}
+    """
+    worst = {**REFERENCE, "name": REFERENCE["name"] + ", Small-category reliability",
+             "reliability": RELIABILITY_SMALL}
+    print(f"Worst case: {worst['name']} (beta {params.WEIBULL_BETA_SMALL}, theta "
+          f"{params.WEIBULL_THETA_SMALL_YEARS} yr); cost study of the worst case:")
+    cases = {"nominal": {"rel": RELIABILITY, "scenario": REFERENCE, "strategies": results, "cost": cost},
+             "worst": {"rel": RELIABILITY_SMALL, "scenario": worst,
+                       "strategies": {label: run_strategy(s, params.ORDER_TO_LAUNCH_DAYS, scenario=worst)
+                                      for label, s in STRATEGIES.items()},
+                       "cost": cost_study(full, scenario=worst, plot=False)}}
+
+    sara_path = casualty.sara_output_path(params.SARA_RUNS["components"]["folder"], params.SARA_OUTPUT_FILE)
+    ec = casualty.read_sara_results(sara_path)["ec"] if sara_path else None
+    residual = end_of_life_tables(params.ALT_KM * 1e3)["moderate"]["residual_s"]
+
+    for name, case in cases.items():
+        num = reliability_numbers(case["rel"])
+        num["p_man_min"] = debris.required_manoeuvre_prob(params.DISPOSAL_PROB_REF, num["r_dl"])
+        case["numbers"] = num
+        print(f"{name}: R(0.5 yr) {num['r_half']:.4f}, R({params.DESIGN_LIFE_YEARS:.0f} yr) {num['r_dl']:.4f}, "
+              f"operational life integral_0^DL R dt {num['life_yr']:.3f} yr; P_d,eff = p_man x "
+              f"{num['r_dl']:.4f}, P_d,eff = {params.DISPOSAL_PROB_REF} (ESSB 5.4.1.1a) needs p_man >= "
+              f"{num['p_man_min']:.4f}" + (" (> 1: not reachable by the manoeuvre alone)"
+                                           if num["p_man_min"] > 1 else ""))
+        print(f"  {'Strategy':46s} {'runs ok max [95 % CI]':>24s} {'runs ok mean [95 % CI]':>24s} "
+              f"{'sats/yr MC':>10s} {'re-entries':>18s} {'sum E_c (components)':>30s}")
+        case["rows"] = {}
+        for label, out in case["strategies"].items():
+            crit = criterion_with_ci(out, case["scenario"])
+            rate = mc_launch_rate_per_year(out, case["scenario"])
+            counts = reentry_counts(out, residual, params.DISPOSAL_PROB_REF)["committed"]
+            risk = casualty.constellation_risk(counts, ec)[0] if ec is not None else None
+            case["rows"][label] = {"crit": crit, "rate": rate, "reentries": counts, "risk": risk}
+            print(f"  {label:46s} " + " ".join(
+                f"{crit[req][0]:.3f} [{crit[req][1]:.3f},{crit[req][2]:.3f}]".rjust(24) for req in REVISIT_REQS)
+                + f" {rate:10.3f} {mean_5_95(counts):>18s} "
+                + (f"{sci_5_95(risk):>30s}" if risk is not None else "SARA run missing".rjust(30)))
+
+    print(f"Ranking (criterion: {params.AVAIL_CONFIDENCE:.0%} of the runs with availability >= "
+          f"{params.AVAIL_TARGET}, configurations of cost_study: c, b+c S = 1..3, d at T*):")
+    for req, spec in REVISIT_REQS.items():
+        texts = {name: ranking_text(case["cost"], req) for name, case in cases.items()}
+        best = {name: (case["cost"]["cheapest"][req] or {}).get("label") for name, case in cases.items()}
+        verdict = "SAME cheapest configuration" if best["nominal"] == best["worst"] else "CHEAPEST CHANGES"
+        print(f"  '{spec['text']}': {verdict}")
+        for name, text in texts.items():
+            print(f"    {name:8s}: {text}")
+    return cases
+
+
 def main():
     parser = argparse.ArgumentParser(description="Constellation lifecycle simulator, nominal case")
     parser.add_argument("--full", action="store_true",
                         help="also check T* of strategy d) with the extra seeds (slower)")
     parser.add_argument("--trade", action="store_true",
                         help="also run the altitude trade-off (slower)")
+    parser.add_argument("--reliability", action="store_true",
+                        help="also run the reliability sensitivity (Small-category Weibull)")
     args = parser.parse_args()
     full = args.full
     print("Mode: full" if full else "Mode: fast (use --full for the T* seed check)")
@@ -1896,6 +2003,12 @@ def main():
 
     print("On-ground casualty risk of the re-entries (v0.3, DRAMA SARA)")
     casualty_study(results, cost)
+
+    if args.reliability:
+        print("Reliability sensitivity (v0.3): Castet & Saleh 2009 vs Small category (Dubos et al. 2009)")
+        reliability_study(results, cost, full)
+    else:
+        print("Reliability sensitivity skipped, run with --reliability")
 
     if args.trade:
         print("Altitude trade-off (v0.3): launch rate vs debris indicators")
