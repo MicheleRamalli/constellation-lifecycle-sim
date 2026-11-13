@@ -133,9 +133,9 @@ R_EARTH_POLAR = 6356752.3142  # polar radius [m], WGS84 (NIMA TR8350.2); only
                               # for the oblateness estimate in the OSCAR comparison (main.py)
 G0 = 9.80665                # standard gravity [m/s^2] (conventional value, CGPM 1901), rocket equation
 J2_EARTH = 1.08263e-3       # second zonal harmonic [-], Vallado, Fundamentals of Astrodynamics
-                            # and Applications, 4th ed. 2013 (standard value)
-TROPICAL_YEAR_DAYS = 365.2422  # mean tropical year [days] (standard value), sets the
-                               # sun-synchronous RAAN rate
+                            # and Applications, 4th ed. 2013
+TROPICAL_YEAR_DAYS = 365.2422  # mean tropical year [days], Vallado, Fundamentals of Astrodynamics
+                               # and Applications, 4th ed. 2013; sets the sun-synchronous RAAN rate
 
 # --- Reference Walker constellation (coverage.py) ---
 # Circular sun-synchronous orbit, inclination from the J2 condition (coverage.sso_inclination).
