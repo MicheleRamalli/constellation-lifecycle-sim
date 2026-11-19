@@ -1,5 +1,7 @@
 # Constellation Lifecycle Simulator
 
+📄 Technical summary (6 pages): [docs/technical_summary.pdf](docs/technical_summary.pdf)
+
 Monte Carlo simulator of the lifecycle of a small LEO Earth-observation constellation
 (deployment, failures, replacements, spares, launch cadence) together with the debris side of the
 same decisions: orbital lifetime with the solar cycle, the ESA 5-year rule, collision probability
