@@ -27,3 +27,6 @@ inputs/tle/
 
 # Raw GCAT launch list (J. McDowell); counts are copied into params.py
 inputs/launch_log/
+
+# Figures of the default fast mode (python main.py); figures/ holds the --full figures
+figures_fast/

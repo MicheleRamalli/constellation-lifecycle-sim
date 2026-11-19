@@ -32,7 +32,10 @@ def test_main_fast_mode_without_drama(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(params, "N_RUNS", params.N_RUNS)
     monkeypatch.setattr(params, "N_RUNS_SWEEP", params.N_RUNS_SWEEP)
     monkeypatch.setattr(main, "CADENCE_CACHE", {})
+    # fast mode must write to FIG_DIR_FAST and leave FIG_DIR (tracked --full figures) untouched;
+    # FIG_DIR is also set here so that monkeypatch restores it after main() switches it
     monkeypatch.setattr(main, "FIG_DIR", str(tmp_path / "figures"))
+    monkeypatch.setattr(main, "FIG_DIR_FAST", str(tmp_path / "figures_fast"))
     monkeypatch.setattr(sys, "argv", ["main.py"])
 
     main.main()
@@ -40,5 +43,6 @@ def test_main_fast_mode_without_drama(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "Mode: FAST" in out and "APPROXIMATE" in out
     assert "not found" in out                        # the missing DRAMA cases are reported
+    assert not os.path.exists(tmp_path / "figures")  # nothing written where the --full figures live
     for name in FIGURES:
-        assert os.path.exists(tmp_path / "figures" / name), name
+        assert os.path.exists(tmp_path / "figures_fast" / name), name

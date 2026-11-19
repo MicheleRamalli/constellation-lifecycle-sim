@@ -1,4 +1,5 @@
-"""Run the nominal case of the constellation and save the figures into figures/.
+"""Run the nominal case of the constellation and save the figures into figures/ (--full) or
+figures_fast/ (default fast mode, not tracked by git).
 
 Constellation: Walker N_PLANES/N_SLOTS (coverage.py), planes simulated as
 independent processes (lifecycle.simulate_constellation). At each time the
@@ -45,9 +46,10 @@ Second scenario: IRIDE Eaglet II, planes reconstructed from the derived TLE tabl
 Usage:
     python main.py          fast mode (default): N_RUNS_FAST Monte Carlo runs instead of
                             N_RUNS / N_RUNS_SWEEP, no check of T* with the extra seeds
-                            params.SEEDS_CHECK: numbers APPROXIMATE, same models and figures
+                            params.SEEDS_CHECK: numbers APPROXIMATE, same models and figures,
+                            figures written to FIG_DIR_FAST (figures_fast/, not tracked)
     python main.py --full   numbers of the report: N_RUNS / N_RUNS_SWEEP runs and the T* check
-                            with the extra seeds
+                            with the extra seeds, figures written to FIG_DIR (figures/, tracked)
     python main.py --trade  also runs the altitude trade-off (altitude_trade.png)
     python main.py --reliability  also runs the reliability sensitivity (Small-category Weibull,
                             Dubos et al. 2009) at ALT_KM with the reference Walker
@@ -96,7 +98,8 @@ from lifecycle import (LAUNCH_FAILURE, RETIREMENT, constellation_availability,
 from reliability import reliability_analytic
 from search import bisect_interval, search_max_interval
 
-FIG_DIR = "figures"
+FIG_DIR = "figures"            # figures of --full runs (tracked by git); main() switches it in fast mode
+FIG_DIR_FAST = "figures_fast"  # figures of the default fast mode (in .gitignore)
 ATM_LABELS = {"nrlmsise": "NRLMSISE-00", "jb2006": "JB-2006"}  # model names for the figures
 N_RUNS_REPORT = params.N_RUNS  # runs of the report (--full); main() lowers params.N_RUNS in fast mode
 COVERAGE_CACHE = os.path.join("data", "revisit_table.npz")
@@ -1987,7 +1990,8 @@ def reliability_study(results, cost, full):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Constellation lifecycle simulator, nominal case")
+    global FIG_DIR   # fast mode redirects the figures, so that the tracked --full figures stay untouched
+    parser =argparse.ArgumentParser(description="Constellation lifecycle simulator, nominal case")
     parser.add_argument("--full", action="store_true",
                         help="numbers of the report: all Monte Carlo runs and the T* seed check (slower)")
     parser.add_argument("--trade", action="store_true",
@@ -2000,6 +2004,7 @@ def main():
     if not full:   # fast mode: fewer runs everywhere (read at call time from params)
         params.N_RUNS = params.N_RUNS_FAST
         params.N_RUNS_SWEEP = params.N_RUNS_FAST
+        FIG_DIR = FIG_DIR_FAST
     os.makedirs(FIG_DIR, exist_ok=True)
 
     print("Coverage of the reference Walker constellation")

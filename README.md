@@ -29,6 +29,9 @@ python main.py            # fast mode, about 5 min, approximate numbers
 pytest                    # about 1 min
 ```
 
+The figures in `figures/` come from `--full` runs (1000 runs); the default fast mode writes to
+`figures_fast/`.
+
 | Command | What it runs | Time* |
 |---|---|---|
 | `python main.py` | fast mode: 200 Monte Carlo runs, numbers **approximate** | 5.1 min |
@@ -41,7 +44,7 @@ pytest                    # about 1 min
 
 \* Measured on a laptop, Python 3.15.2, with the coverage cache in `data/` (tracked in the repo;
 without it the coverage tables are rebuilt once, 20-30 min more). Figures are written to
-`figures/`.
+`figures/` with `--full` and to `figures_fast/` (not tracked) otherwise.
 
 **External files (optional).** Some comparison cases read outputs of ESA's DRAMA 4.1.4 at run time
 (OSCAR and SARA runs, the solar-activity forecast and the population density file). They are never
@@ -147,10 +150,13 @@ the cumulative risk compared with launch on failure.
   category*, IAC-09-D1.3.6 (2009).
 - ECSS-E-ST-10-04C Rev.1, *Space environment* (2020): density tables (Annex G), solar cycle 23 (Table A-1).
 - ESA, *Space Debris Mitigation Requirements*, ESSB-ST-U-007 Issue 1 Rev 0 (2023).
-- ESA DRAMA 4.1.4 (OSCAR, SARA) and MASTER-8: runs made by the author, outputs read at run time.
+- ESA DRAMA 4.1.4 (OSCAR, SARA): runs made by the author, outputs read at run time.
+- ESA MASTER-8: runs made by the author; the derived flux table is in `inputs/master8_flux_sso.csv`.
 - NASA ODPO, Debris Assessment Software; NASA-STD-8719.14 (casualty area).
 - J. McDowell, GCAT launch log; CelesTrak TLEs (only the derived elements are in `inputs/`).
 - ASI, IRIDE programme page (Eaglet II launches).
+
+Debris flux values derived from ESA MASTER-8 (v8.2.3, population 2602); MASTER itself is not included.
 
 ---
 
