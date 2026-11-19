@@ -434,7 +434,7 @@ OSCAR_OUTPUT_FILE = "output/dmf_output.json"  # inside each folder; read at run 
 
 # --- Simulation ---
 SIM_DURATION_YEARS = 15.0  # ASSUMPTION: reference mission horizon, to be reviewed
-DT_DAYS = 1.0              # fixed time step (project rule, CLAUDE.md)
+DT_DAYS = 1.0              # fixed time step (ASSUMPTION: 1 day is short compared with launch, failure and replacement timescales)
 N_RUNS = 1000              # number of Monte Carlo runs
 N_RUNS_SWEEP = 1000        # Monte Carlo runs per point of the parameter sweeps in main.py
 # N_RUNS and N_RUNS_SWEEP above are the values of the report (python main.py --full).
